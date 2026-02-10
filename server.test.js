@@ -11,7 +11,6 @@
 
 const http = require('http');
 const { spawn } = require('child_process');
-const path = require('path');
 
 const hostname = '127.0.0.1';
 const port = 3000;
@@ -36,7 +35,7 @@ function makeRequest(method, urlPath) {
       timeout: 5000
     };
 
-    const req = http.request(options, (res) => {
+    const responseHandler = (res) => {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (chunk) => {
@@ -49,7 +48,13 @@ function makeRequest(method, urlPath) {
           body
         });
       });
-    });
+    };
+
+    // Use http.get() for GET requests (convenience method that auto-ends),
+    // and http.request() for all other HTTP methods
+    const req = method === 'GET'
+      ? http.get(options, responseHandler)
+      : http.request(options, responseHandler);
 
     req.on('error', (err) => {
       reject(err);
@@ -59,7 +64,10 @@ function makeRequest(method, urlPath) {
       req.destroy(new Error('Request timed out'));
     });
 
-    req.end();
+    // http.get() auto-calls req.end(); only call explicitly for other methods
+    if (method !== 'GET') {
+      req.end();
+    }
   });
 }
 
@@ -70,7 +78,7 @@ function makeRequest(method, urlPath) {
  */
 function startServer() {
   return new Promise((resolve, reject) => {
-    const serverPath = path.join(__dirname, 'server.js');
+    const serverPath = __dirname + '/server.js';
     const serverProcess = spawn('node', [serverPath], {
       stdio: ['pipe', 'pipe', 'pipe']
     });
