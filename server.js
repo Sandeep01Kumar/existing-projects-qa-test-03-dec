@@ -219,8 +219,15 @@ const canWrite = (res) => {
     !res.writableEnded &&
     !res.destroyed &&
     res.writable &&
-    !!res.socket &&
-    !res.socket.destroyed
+    // A response may not yet have a socket assigned: on a keep-alive connection
+    // the NEXT pipelined response is queued behind the in-flight one and Node
+    // defers its socket assignment (res.socket === null) until the prior
+    // response finishes. Such a response is still perfectly writable — calling
+    // res.end() queues it and Node flushes it in order — so a null socket must
+    // NOT be treated as terminal. Only a socket that EXISTS and is already
+    // destroyed blocks the write; the states above (headersSent / writableEnded
+    // / destroyed) already cover a genuinely finished or dead response.
+    !(res.socket && res.socket.destroyed)
   );
 };
 
@@ -268,18 +275,146 @@ const safelyRespond = (res, statusCode, body, headers) => {
     return true;
   } catch (writeErr) {
     log('ERROR', `Failed to write ${statusCode} response: ${formatError(writeErr)}`);
-    // The response could not be written (for example an internal failure while
-    // sending headers). Release the underlying socket immediately rather than
-    // leaving it to linger until the socket timeout (server.timeout) fires, so
-    // the failed exchange does not retain a connection. Guarded so an absent or
+    // Attempt a guarded 500 fallback BEFORE releasing the socket, so a fault
+    // while writing a NON-500 response (for example res.setHeader throwing part
+    // way through the header loop) still yields a proper Internal Server Error
+    // instead of an empty / reset connection. Two rails prevent any loop:
+    //   (1) only attempt when the failed write was NOT itself a 500, so a 500
+    //       whose own write fails does not recurse into another 500; and
+    //   (2) only when no bytes are committed yet (headers not sent, writable not
+    //       ended) and the socket is still alive.
+    // res.writeHead() is used deliberately: it emits the status line and headers
+    // through Node's internal path, BYPASSING a res.setHeader that may itself be
+    // the source of the failure. The fallback carries the same security headers
+    // as every other response, and "Connection: close" makes Node flush the 500
+    // and then close the socket (so the client reliably receives the complete
+    // response before the connection is released). The whole fallback is wrapped
+    // in its own try/catch so a second failure degrades to a socket release
+    // rather than escalating into an uncaught exception.
+    let fallbackWritten = false;
+    if (
+      statusCode !== 500 &&
+      !res.headersSent &&
+      !res.writableEnded &&
+      res.socket &&
+      !res.socket.destroyed
+    ) {
+      try {
+        const fallbackBody = 'Internal Server Error\n';
+        res.writeHead(500, {
+          ...SECURITY_HEADERS,
+          'Content-Type': 'text/plain',
+          'Content-Length': Buffer.byteLength(fallbackBody),
+          Connection: 'close',
+        });
+        res.end(fallbackBody);
+        fallbackWritten = true;
+      } catch (fallbackErr) {
+        log('ERROR', `Failed to write 500 fallback response: ${formatError(fallbackErr)}`);
+      }
+    }
+    // When no fallback response could be produced (the failed write was already a
+    // 500, headers were already sent, or the fallback itself failed), release the
+    // underlying socket immediately rather than leaving it to linger until the
+    // socket timeout (server.timeout) fires. Guarded so an absent or
     // already-destroyed socket is left untouched (no double-destroy), mirroring
-    // the reject() socket-release idiom used elsewhere.
-    const socket = res.socket;
-    if (socket && !socket.destroyed) {
-      socket.destroy();
+    // the reject() socket-release idiom used elsewhere. When a fallback WAS
+    // written, "Connection: close" already governs the socket's release after the
+    // 500 flushes, so we do not destroy it out from under the in-flight response.
+    if (!fallbackWritten) {
+      const socket = res.socket;
+      if (socket && !socket.destroyed) {
+        socket.destroy();
+      }
     }
     return false;
   }
+};
+
+// ---------------------------------------------------------------------------
+// Helpers: request-target and Host header validation
+// ---------------------------------------------------------------------------
+// Validate a single Host header value against a strict authority grammar
+// (RFC 7230 section 5.4 / RFC 3986 authority = host [":" port], with NO
+// userinfo). Rejects: an empty value; any whitespace or control character;
+// a comma; a userinfo ("@"), path ("/" or "\\"), query ("?"), or fragment
+// ("#") delimiter; a host that is neither a reg-name/IPv4 nor a bracketed
+// IPv6 literal; or a non-numeric / out-of-range port. This preserves the
+// success contract (e.g. "Host: x" and "Host: 127.0.0.1:3000" pass) while
+// rejecting the ambiguity / request-smuggling vectors flagged by QA.
+const isValidHostHeader = (value) => {
+  if (typeof value !== 'string' || value.length === 0) {
+    return false;
+  }
+  // Reject anything that must never appear in a bare authority: whitespace or
+  // control characters, comma, and the userinfo/path/query/fragment
+  // delimiters. Their presence signals a malformed or ambiguous authority.
+  if (/[\s,@/\\?#]/.test(value)) {
+    return false;
+  }
+  let host;
+  let port;
+  if (value[0] === '[') {
+    // Bracketed IPv6 literal, optionally followed by ":" port.
+    const close = value.indexOf(']');
+    if (close === -1) {
+      return false;
+    }
+    const inner = value.slice(1, close);
+    if (inner.length === 0 || !/^[0-9A-Fa-f:.]+$/.test(inner)) {
+      return false;
+    }
+    const rest = value.slice(close + 1);
+    if (rest === '') {
+      port = '';
+    } else if (rest[0] === ':') {
+      port = rest.slice(1);
+    } else {
+      return false;
+    }
+  } else {
+    // reg-name or IPv4, optionally followed by ":" port. Split on the LAST
+    // colon so a trailing port (if any) is isolated; a reg-name/IPv4 has none.
+    const colon = value.lastIndexOf(':');
+    if (colon === -1) {
+      host = value;
+      port = '';
+    } else {
+      host = value.slice(0, colon);
+      port = value.slice(colon + 1);
+    }
+    if (host.length === 0 || !/^[A-Za-z0-9.-]+$/.test(host)) {
+      return false;
+    }
+  }
+  if (port !== '') {
+    if (!/^\d+$/.test(port)) {
+      return false;
+    }
+    const portNum = Number(port);
+    if (portNum < 1 || portNum > 65535) {
+      return false;
+    }
+  }
+  return true;
+};
+
+// Collect every Host header value (case-insensitive) directly from
+// req.rawHeaders. This is deliberately NOT req.headers.host, which silently
+// COLLAPSES duplicate Host headers to the first value and would mask a
+// request-smuggling / ambiguity attempt. rawHeaders is a flat
+// [name, value, name, value, ...] array preserving every header as sent, so
+// the true cardinality of Host is observable here.
+const collectHostHeaders = (rawHeaders) => {
+  const values = [];
+  if (Array.isArray(rawHeaders)) {
+    for (let i = 0; i + 1 < rawHeaders.length; i += 2) {
+      if (String(rawHeaders[i]).toLowerCase() === 'host') {
+        values.push(rawHeaders[i + 1]);
+      }
+    }
+  }
+  return values;
 };
 
 // ---------------------------------------------------------------------------
@@ -339,6 +474,37 @@ const requestHandler = (req, res) => {
       releaseSocket();
     }
   };
+
+  // Per-request deadline. This GUARANTEES that a stalled exchange releases its
+  // socket within REQUEST_TIMEOUT, deterministically and independently of
+  // Node's built-in server.requestTimeout — whose enforcement runs only on a
+  // coarse connectionsCheckingInterval sweep and therefore reclaims a client
+  // that sends headers and then stalls mid-body much later than the configured
+  // budget (observed at ~60-90s for a 30s setting). The timer is armed at
+  // handler entry, unref'd so it never keeps the event loop alive on its own,
+  // and cleared as soon as the response finishes (so a normal keep-alive
+  // request incurs no lingering timer). On expiry it rejects with a 408
+  // (Request Timeout) via the shared reject() path — which sets
+  // "Connection: close" and releases the socket after the 408 flushes — so a
+  // stalled request cannot hold the connection open indefinitely.
+  let settled = false;
+  const requestDeadline = setTimeout(() => {
+    if (settled) {
+      return;
+    }
+    log(
+      'WARN',
+      `Request exceeded ${REQUEST_TIMEOUT}ms without completing; responding 408 and closing the socket.`
+    );
+    reject(408, 'Request Timeout\n', { 'Content-Type': 'text/plain' });
+  }, REQUEST_TIMEOUT);
+  requestDeadline.unref();
+  res.on('finish', () => {
+    // The response completed: cancel the deadline so a normal (including
+    // keep-alive) request leaves no lingering timer.
+    settled = true;
+    clearTimeout(requestDeadline);
+  });
 
   // Structured request logging once the response is flushed. The method is
   // sanitized and only the pathname is logged (the query string is dropped) so
@@ -405,17 +571,96 @@ const requestHandler = (req, res) => {
       return;
     }
 
-    // (2b) Safe URL parse via the global WHATWG URL constructor -> 400 on
-    // failure. A base derived from the Host header lets relative request targets
-    // (e.g. "/") parse correctly. Only the sanitized pathname is ever logged.
+    // (2b) Request-target grammar guard -> 400. Reject targets that violate
+    // RFC 7230 request-target syntax BEFORE any URL parsing, because the WHATWG
+    // URL parser would otherwise silently repair them and mask the fault:
+    //   - A literal "#": a fragment is never part of a request-target; its
+    //     presence means the target is malformed (WHATWG would strip it,
+    //     collapsing "/#x" to "/" and answering 200).
+    //   - A malformed percent-encoding: a "%" not followed by exactly two hex
+    //     digits (e.g. "%zz" or a trailing "%"). Valid triplets such as "%2e"
+    //     (which decodes to ".") are deliberately preserved.
+    if (req.url.includes('#') || /%(?![0-9A-Fa-f]{2})/.test(req.url)) {
+      log('ERROR', `Malformed request target ${safeRequestTarget(req.url)}`);
+      reject(400, 'Bad Request\n', { 'Content-Type': 'text/plain' });
+      return;
+    }
+
+    // (2c) Host header validation -> 400. Read Host from rawHeaders so duplicate
+    // Host headers are detectable (req.headers.host hides them by collapsing to
+    // the first). HTTP/1.1 requires EXACTLY ONE Host; HTTP/1.0 permits zero or
+    // one. More than one Host, or a single value that fails the strict authority
+    // grammar, is rejected. A missing Host under HTTP/1.1 is also a 400 and is
+    // answered here (through the centralized policy, so the security headers are
+    // applied) rather than by Node's bare auto-generated 400.
+    const hostValues = collectHostHeaders(req.rawHeaders);
+    const isHttp11 = req.httpVersion === '1.1';
+    if (hostValues.length > 1) {
+      log('ERROR', 'Rejected request with multiple Host headers');
+      reject(400, 'Bad Request\n', { 'Content-Type': 'text/plain' });
+      return;
+    }
+    if (hostValues.length === 0) {
+      if (isHttp11) {
+        log('ERROR', 'Rejected HTTP/1.1 request with missing Host header');
+        reject(400, 'Bad Request\n', { 'Content-Type': 'text/plain' });
+        return;
+      }
+    } else if (!isValidHostHeader(hostValues[0])) {
+      log('ERROR', 'Rejected request with malformed Host header');
+      reject(400, 'Bad Request\n', { 'Content-Type': 'text/plain' });
+      return;
+    }
+
+    // (2d) Safe URL parse -> 400 on failure, distinguishing the request-target
+    // forms of RFC 7230 section 5.3. Only the sanitized pathname is ever logged.
+    //   - origin-form (begins with "/"): the ENTIRE target is a path + optional
+    //     query. It is parsed by concatenating a fixed synthetic origin so a
+    //     leading "//" is interpreted as a PATH ("//") rather than a WHATWG
+    //     network-path (authority) reference. This makes "//" route as an
+    //     unknown path (404) instead of failing to parse (400).
+    //   - absolute-form (begins with "scheme://"): parsed directly. Any embedded
+    //     userinfo, or an authority that does not match the validated Host
+    //     header, is rejected as an ambiguity / smuggling vector.
+    // Anything else (asterisk-form "*", authority-form, or garbage) -> 400.
     let parsed;
-    try {
-      parsed = new URL(req.url, `http://${req.headers.host || HOST}`);
-    } catch (parseErr) {
-      log(
-        'ERROR',
-        `Malformed request URL ${safeRequestTarget(req.url)}: ${formatError(parseErr)}`
-      );
+    if (req.url[0] === '/') {
+      try {
+        parsed = new URL(`http://localhost${req.url}`);
+      } catch (parseErr) {
+        log(
+          'ERROR',
+          `Malformed request URL ${safeRequestTarget(req.url)}: ${formatError(parseErr)}`
+        );
+        reject(400, 'Bad Request\n', { 'Content-Type': 'text/plain' });
+        return;
+      }
+    } else if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(req.url)) {
+      try {
+        parsed = new URL(req.url);
+      } catch (parseErr) {
+        log(
+          'ERROR',
+          `Malformed request URL ${safeRequestTarget(req.url)}: ${formatError(parseErr)}`
+        );
+        reject(400, 'Bad Request\n', { 'Content-Type': 'text/plain' });
+        return;
+      }
+      // Reject userinfo embedded in the absolute-form authority.
+      if (parsed.username !== '' || parsed.password !== '') {
+        log('ERROR', 'Rejected absolute-form request target with userinfo');
+        reject(400, 'Bad Request\n', { 'Content-Type': 'text/plain' });
+        return;
+      }
+      // The absolute-form authority must match the (validated) Host header
+      // when one is present (RFC 7230 section 5.4).
+      if (hostValues.length === 1 && parsed.host !== hostValues[0]) {
+        log('ERROR', 'Rejected absolute-form request target with authority mismatch');
+        reject(400, 'Bad Request\n', { 'Content-Type': 'text/plain' });
+        return;
+      }
+    } else {
+      log('ERROR', `Unsupported request target form ${safeRequestTarget(req.url)}`);
       reject(400, 'Bad Request\n', { 'Content-Type': 'text/plain' });
       return;
     }
@@ -510,7 +755,22 @@ const requestHandler = (req, res) => {
 // ---------------------------------------------------------------------------
 // Server construction and resilience
 // ---------------------------------------------------------------------------
-const server = http.createServer(requestHandler);
+// requireHostHeader is disabled so a request with a MISSING Host header is NOT
+// short-circuited by Node's bare, header-less auto-400; instead it reaches the
+// request handler, whose Host validation answers it through the centralized
+// policy (a 400 that carries the standard security headers). The handler still
+// enforces the HTTP/1.1 "exactly one Host" rule, so disabling Node's built-in
+// check does not weaken validation - it relocates it to the policy path.
+const server = http.createServer({ requireHostHeader: false }, requestHandler);
+
+// Route requests bearing an unsupported Expectation (any Expect value other
+// than the natively handled "100-continue") through the SAME request handler,
+// rather than letting Node emit its bare 417 Expectation Failed with no
+// security headers. The handler processes the request normally and its response
+// carries the centralized security headers. "Expect: 100-continue" is untouched
+// here and remains handled by Node's default checkContinue path (a 100 Continue
+// interim response), so this does not alter the continue protocol.
+server.on('checkExpectation', requestHandler);
 
 // Parser-level client errors (malformed request line, oversized headers, or an
 // over-limit request URL) are emitted here BEFORE the request handler runs, so
@@ -549,6 +809,40 @@ server.on('clientError', (err, socket) => {
       '\r\n' +
       'Bad Request\n'
   );
+});
+
+// CONNECT requests fall outside the supported method set (GET / HEAD only).
+// Node delivers them via the 'connect' event on a RAW socket - the normal
+// 'request' handler NEVER runs for a CONNECT - so without this listener a
+// CONNECT would bypass the method allowlist entirely and the socket would hang
+// until a timeout. Answer with the SAME 405 semantics the request handler
+// produces for any disallowed method: the Allow header advertising the
+// permitted methods, plus the centralized security headers, then close the
+// tunnel attempt. Because the socket is raw, the response is written directly.
+server.on('connect', (req, socket) => {
+  // A half-open or aborted tunnel socket can emit 'error'; swallow it safely so
+  // it never escalates into an uncaught exception, mirroring the guarded socket
+  // handling used elsewhere.
+  socket.on('error', () => {});
+  const body = 'Method Not Allowed\n';
+  const response =
+    'HTTP/1.1 405 Method Not Allowed\r\n' +
+    'Content-Type: text/plain\r\n' +
+    `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+    `Allow: ${ALLOW_HEADER}\r\n` +
+    'X-Content-Type-Options: nosniff\r\n' +
+    'X-Frame-Options: DENY\r\n' +
+    'Connection: close\r\n' +
+    '\r\n' +
+    body;
+  if (socket.writable) {
+    // end() flushes the 405 bytes and then closes the write side (FIN), so the
+    // client receives the complete response before the socket is released.
+    socket.end(response);
+  } else if (!socket.destroyed) {
+    socket.destroy();
+  }
+  log('INFO', `CONNECT ${sanitizeLogValue(req.url)} -> 405`);
 });
 
 // ---------------------------------------------------------------------------
