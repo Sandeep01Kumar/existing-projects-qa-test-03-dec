@@ -224,17 +224,41 @@ const canWrite = (res) => {
   );
 };
 
+// Security response headers applied to EVERY response, across all status
+// classes (200 / 400 / 404 / 405 / 413 / 500 and the parser-level clientError
+// 400 below). These are cheap, dependency-free, defense-in-depth headers:
+//   - X-Content-Type-Options: nosniff -> disables MIME-type sniffing so a
+//     response is always interpreted as its declared Content-Type.
+//   - X-Frame-Options: DENY           -> forbids framing (clickjacking
+//     protection). Applied uniformly even though this service returns only
+//     text/plain, so the guarantee holds on every response path.
+// They do NOT alter the preserved GET / success contract: the status code,
+// Content-Type, Content-Length, and body are unchanged; only these additional
+// headers are added.
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+};
+
 // Guarded response writer used for EVERY response (the 200/HEAD success path
 // included). It never writes twice and never writes to a finished or destroyed
 // response: if canWrite() is false it silently no-ops, preventing "headers
 // already sent" and write-after-end crashes. Any synchronous write failure is
-// caught and logged safely rather than escalating into an uncaught exception.
+// caught and logged safely rather than escalating into an uncaught exception,
+// and the underlying socket is then released so a failed exchange never
+// lingers until the socket timeout fires.
 const safelyRespond = (res, statusCode, body, headers) => {
   if (!canWrite(res)) {
     return false;
   }
   try {
     res.statusCode = statusCode;
+    // Apply the constant security headers to every response first, then any
+    // caller-supplied headers (Content-Type, Content-Length, Allow,
+    // Connection, ...). Header names are distinct, so ordering is immaterial.
+    for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+      res.setHeader(name, value);
+    }
     if (headers) {
       for (const [name, value] of Object.entries(headers)) {
         res.setHeader(name, value);
@@ -244,6 +268,16 @@ const safelyRespond = (res, statusCode, body, headers) => {
     return true;
   } catch (writeErr) {
     log('ERROR', `Failed to write ${statusCode} response: ${formatError(writeErr)}`);
+    // The response could not be written (for example an internal failure while
+    // sending headers). Release the underlying socket immediately rather than
+    // leaving it to linger until the socket timeout (server.timeout) fires, so
+    // the failed exchange does not retain a connection. Guarded so an absent or
+    // already-destroyed socket is left untouched (no double-destroy), mirroring
+    // the reject() socket-release idiom used elsewhere.
+    const socket = res.socket;
+    if (socket && !socket.destroyed) {
+      socket.destroy();
+    }
     return false;
   }
 };
@@ -501,9 +535,15 @@ server.on('clientError', (err, socket) => {
     socket.destroy();
     return;
   }
+  // Mirror the security headers that safelyRespond adds to every application
+  // response so this parser-level 400 path carries identical defense-in-depth
+  // headers. Content-Length stays 12: the "Bad Request\n" body is unchanged;
+  // the two added lines are response headers, not body bytes.
   socket.end(
     'HTTP/1.1 400 Bad Request\r\n' +
       'Content-Type: text/plain\r\n' +
+      'X-Content-Type-Options: nosniff\r\n' +
+      'X-Frame-Options: DENY\r\n' +
       'Connection: close\r\n' +
       'Content-Length: 12\r\n' +
       '\r\n' +
