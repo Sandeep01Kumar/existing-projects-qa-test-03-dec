@@ -4,9 +4,12 @@
 //
 // PURPOSE
 //   Makes the documentation conventions machine-checkable rather than only
-//   reviewed by eye. The authored markdown corpus is 13 files -- README.md,
-//   CONTRIBUTING.md and 11 pages under docs/ -- and this configuration is the
-//   gate that fails when one of them drifts away from the agreed conventions.
+//   reviewed by eye. The corpus it holds to them is every authored markdown file
+//   in the repository except those under the directories named in "ignores" --
+//   whatever that set happens to be when the gate runs -- and this configuration
+//   is what fails when one of those files drifts away from the agreed
+//   conventions. No file count or file list is recorded anywhere in here on
+//   purpose: both would go stale the first time a page is added or removed.
 //
 //   This repository ships no style guide to inherit: there is no .editorconfig,
 //   no .prettierrc, no .eslintrc* and no style document of any kind. The
@@ -20,17 +23,61 @@
 //   which of those it comes from, so nothing here rests on an assumption.
 //
 // HOW IT IS RUN
-//   npm run docs:lint    -> markdownlint-cli2 over the authored corpus
+//   npm run docs:lint    -> markdownlint-cli2 with NO glob arguments, so the
+//                           corpus comes from the "globs" and "ignores" arrays
+//                           below and from nowhere else
 //   npm run docs:check   -> docs:lint followed by docs:links
-//   npx markdownlint-cli2 (no arguments) -> uses the "globs" below
+//   npx markdownlint-cli2 (no arguments) -> identical coverage, same arrays
+//
+//   All three routes behave identically, because "docs:lint" is a bare
+//   markdownlint-cli2 invocation: every glob and every exclusion comes from
+//   this file (see "globs" and "ignores" below), never from the npm script.
+//
+// RUNTIME FLOOR FOR THIS TOOL -- NOT the application's floor
+//   The service itself runs on Node >=18, and that is the floor package.json
+//   declares in "engines". The documentation toolchain needs a newer runtime
+//   than the service does: markdownlint-cli2 0.23.2 declares "node": ">=22",
+//   and markdown-link-check 3.15.0 resolves commander 15.0.0, which declares
+//   "node": ">=22.12.0". Node >=22.12.0 is therefore the floor for running the
+//   lint and link gates, and package.json states it separately as
+//   "devEngines.runtime" so the two floors cannot be read as one.
+//
+//   The two floors are also enforced differently on purpose. npm evaluates
+//   "devEngines" on install and on "npm run", so its policy there is
+//   "onFail": "warn": an error would abort "npm start" and "npm test" on a
+//   runtime the application floor supports, which would be wrong. Every docs:*
+//   script instead runs tools/check-doc-runtime.js first, and that preflight
+//   fails closed -- a documentation gate has no useful behaviour below the
+//   toolchain floor, so it stops rather than warning and continuing. Either way
+//   the service is unaffected and still runs on Node >=18.
 //
 // DISCOVERY
-//   markdownlint-cli2 locates its configuration by EXACT filename. The name
-//   ".markdownlint-cli2.jsonc" is the highest-precedence entry in its search
-//   list. A near-miss such as ".markdownlint.jsonc" or
-//   ".markdownlint-cli2.json" is silently ignored, which turns the whole gate
-//   into a no-op that still reports success -- so the filename matters as much
-//   as the contents.
+//   markdownlint-cli2 locates configuration by EXACT filename, and it reads two
+//   different families of file. They are not interchangeable:
+//
+//     .markdownlint-cli2.{jsonc,yaml,cjs,mjs}
+//       FULL configuration. Only this family may carry CLI2 options such as the
+//       "globs" and "ignores" arrays below, alongside the markdownlint rules in
+//       "config". ".markdownlint-cli2.jsonc" is the first name in that list,
+//       which is why this file uses it.
+//
+//     .markdownlint.{jsonc,json,yaml,yml,cjs,mjs}
+//       Also supported, but as RULE configuration only: it supplies markdownlint
+//       rules and honours "extends", and it cannot declare globs or ignores.
+//       A file from this family is therefore not a substitute for this one --
+//       the rules would still be applied, but nothing would tell the tool which
+//       files to apply them to.
+//
+//   ".markdownlint-cli2.json" (no trailing "c") belongs to neither family and is
+//   read by nothing. Renaming this file to that would leave the arrays below
+//   unread, and with no globs from a configuration file and none on the command
+//   line the tool prints its usage banner and exits 2. So the failure mode is
+//   loud rather than a silently passing no-op -- but it lints nothing, and the
+//   filename still matters as much as the contents.
+//
+//   A run that does load this file echoes the resolved set, for example
+//   "Finding: **/*.md !node_modules/** !docs/api/generated/**" -- which is the
+//   quickest way to confirm it was actually read.
 //
 // EDITING POLICY
 //   Every rule switched off here is a convention the corpus stops being held
@@ -38,14 +85,22 @@
 //   genuinely conflicts with a documented requirement. Exactly two relaxations
 //   are authorised (see MD013 and the note at MD033); do not add a third.
 //
-//   Verified against markdownlint-cli2 0.23.2 / markdownlint 0.41.1, the
-//   versions pinned in package.json devDependencies. Every option name below
-//   exists in that version's configuration schema.
+// VERSIONS THIS FILE WAS VERIFIED AGAINST
+//   markdownlint-cli2 0.23.2 -- the DIRECT dependency, pinned exactly in
+//   package.json devDependencies. It is the only one of the two this repository
+//   declares.
+//   markdownlint 0.41.1 -- the rule library markdownlint-cli2 depends on. It is
+//   NOT a direct dependency and is not named in package.json; the version above
+//   is the TRANSITIVE resolution recorded in package-lock.json, and it is what
+//   `npm run docs:lint` prints on its first line. Bump it by updating the direct
+//   pin and regenerating the lockfile, never by editing the lockfile by hand.
+//   Every option name below exists in that pair's configuration schema.
 // ---------------------------------------------------------------------------
 {
     // Schema for editor completion and validation of THIS file. Pinned to the
-    // same markdownlint-cli2 version as package.json devDependencies so the
-    // reference cannot drift away from the tool that consumes it.
+    // exact markdownlint-cli2 version that package.json declares directly
+    // (0.23.2), so the reference cannot drift away from the tool that consumes
+    // it. Note this is the CLI's schema, not the rule library's.
     "$schema": "https://raw.githubusercontent.com/DavidAnson/markdownlint-cli2/v0.23.2/schema/markdownlint-cli2-config-schema.json",
 
     // markdownlint rule configuration. Anything not named here keeps its
@@ -161,51 +216,58 @@
         "MD041": true
     },
 
-    // Files to lint when markdownlint-cli2 is invoked without command-line
-    // globs (for example a bare `npx markdownlint-cli2`). markdownlint-cli2
-    // APPENDS these to any globs given on the command line rather than
-    // replacing them, so `npm run docs:lint` and a bare invocation both end up
-    // covering the same set.
+    // Files to lint. This array is the SINGLE SOURCE OF TRUTH for which files
+    // the lint gate covers: `scripts.docs:lint` in package.json invokes
+    // `markdownlint-cli2` with NO glob arguments, so every invocation route --
+    // the npm script, a bare `npx markdownlint-cli2`, or an editor integration
+    // -- resolves the corpus from right here. No other file restates this list.
     //
-    // "**/*.md" is used in preference to a literal 13-entry list on purpose. A
+    // That is deliberate. markdownlint-cli2 APPENDS command-line globs to this
+    // array rather than replacing it, so passing the same patterns on the
+    // command line as well would express one policy in two places: the two
+    // could drift, and a stale command-line argument could widen or override
+    // the coverage intended here. Keep the patterns here and nowhere else.
+    //
+    // "**/*.md" is used in preference to a literal file list on purpose. A
     // literal list has to be edited every time a page is added, and the failure
     // mode when someone forgets is silent: the new page is simply never linted.
-    // A recursive glob plus the two "ignores" below covers the entire authored
-    // corpus and nothing else, so no page can be missed:
+    // A fixed count or inventory written into a comment rots the same way, only
+    // less visibly, so neither appears here.
     //
-    //     README.md                                    1
-    //     CONTRIBUTING.md                              1
-    //     docs/README.md                               1
-    //     docs/repository-assets.md                    1
-    //     docs/getting-started/*.md                    2  installation, configuration
-    //     docs/api/*.md                                2  http-api, server-module
-    //     docs/guides/*.md                             2  deployment, troubleshooting
-    //     docs/architecture/*.md                       3  overview, request-lifecycle,
-    //                                                     code-walkthrough
-    //                                                 --
-    //                                                 13  authored markdown files
+    // The invariant this array encodes instead: the recursive glob, minus the
+    // directories named in "ignores" below, is exactly the set of authored
+    // markdown files in the repository -- whichever files those are, at whatever
+    // depth, now or after the corpus grows. Nothing has to be enumerated for a
+    // new page to be covered, and no page can be missed.
     "globs": [
         "**/*.md"
     ],
 
-    // Paths excluded from the recursive glob above. These live here rather than
-    // in the npm script so that `scripts.docs:lint` in package.json stays
-    // simple and every invocation route -- npm script, bare npx, or an editor
-    // integration -- honours the same exclusions. They mirror .gitignore
-    // one-for-one.
+    // Paths excluded from the recursive glob above. They live here and only
+    // here: `scripts.docs:lint` in package.json passes no globs and no
+    // exclusions of its own, so this file is the single source of truth and
+    // every invocation route -- npm script, bare npx, or an editor integration
+    // -- honours exactly the same set. They mirror .gitignore one-for-one.
     //
     //   node_modules/**        Materialised by `npm install` resolving the three
-    //                         documentation devDependencies, and currently home
-    //                         to several hundred third-party *.md files. None of
-    //                         it is ours to lint, and leaving it in would bury
-    //                         real findings under upstream noise.
+    //                         documentation devDependencies, after which it may
+    //                         contain many third-party *.md files. None of them
+    //                         are ours to lint, and leaving the directory in
+    //                         would bury real findings under upstream noise.
     //
-    //   docs/api/generated/**  JSDoc HTML/markdown output produced by
-    //                         `npm run docs:api` from the annotations in
-    //                         server.js. It is git-ignored build output, is
-    //                         never the target of an authored link, and cannot
-    //                         be corrected at source -- linting it would report
-    //                         violations that nobody can fix.
+    //   docs/api/generated/**  Generated output, of both kinds: `npm run docs:api`
+    //                         writes the JSDoc HTML reference here, and
+    //                         `npm run docs:md` writes the markdown module
+    //                         reference here. Both are derived from the JSDoc
+    //                         annotations in server.js, so the files are
+    //                         git-ignored build products and are never the
+    //                         target of an authored link. They are excluded
+    //                         because generated files must not be edited in
+    //                         place: a violation reported here would be fixed in
+    //                         its source -- the comments in server.js, jsdoc.json
+    //                         or the generator template -- and the artefact
+    //                         regenerated, so linting the artefact itself adds
+    //                         nothing.
     "ignores": [
         "node_modules/**",
         "docs/api/generated/**"

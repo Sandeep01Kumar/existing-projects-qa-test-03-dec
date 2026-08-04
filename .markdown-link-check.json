@@ -1,0 +1,156 @@
+{
+    "$comment": [
+        "Link-integrity policy for `npm run docs:links` (markdown-link-check 3.15.0).",
+        "",
+        "WHY THIS FILE EXISTS",
+        "The link gate reads URLs out of repository Markdown, which is untrusted input:",
+        "any branch, patch or pull request can put an arbitrary URL in a documentation",
+        "page. Without this policy the checker dereferences every one of those URLs from",
+        "whichever machine runs the gate - a reviewer's workstation or a CI runner. It",
+        "issues a HEAD, falls back to a GET, follows up to eight redirects, resolves DNS",
+        "for the host, reads absolute `file:` targets off the local disk, and performs an",
+        "MX lookup for `mailto:` addresses. That is a server-side request forgery sink",
+        "(CWE-918): a link such as `http://169.254.169.254/latest/meta-data/` turns the",
+        "gate into an internal-network and local-file oracle, and can trigger side",
+        "effects on internal GET endpoints.",
+        "",
+        "WHY A DENYLIST IS NOT THE FIX",
+        "Filtering which hosts are allowed still leaves the request being made, so the",
+        "filter is bypassable by an HTTP redirect to an internal address or by DNS",
+        "rebinding. markdown-link-check cannot be told to stop following redirects - its",
+        "CLI copies only ignorePatterns, replacementPatterns, httpHeaders, timeout,",
+        "ignoreDisable, retryOn429, retryCount, fallbackRetryDelay, aliveStatusCodes and",
+        "reporters out of this file, and `maxRedirects` is not among them.",
+        "",
+        "WHAT THIS POLICY DOES INSTEAD - IT REMOVES THE SINK",
+        "The gate is made hermetic: it performs no network I/O at all, so there is no",
+        "request to forge, no redirect to follow and no name to resolve. Every extracted",
+        "link takes exactly one of three paths:",
+        "  1. `http:`, `https:` and `mailto:` links are matched by `ignorePatterns`, which",
+        "     markdown-link-check evaluates BEFORE it calls the checker, short-circuiting",
+        "     with status `ignored`. No HEAD, no GET, no redirect, no DNS or MX lookup.",
+        "  2. Every other absolute target - including absolute `file:` URLs, scheme-",
+        "     relative `//host/...` URLs, opaque schemes such as `javascript:` and",
+        "     `data:`, and paths that traverse above the repository root - is rewritten by",
+        "     `replacementPatterns` onto a repository-relative path that cannot exist, so",
+        "     it is reported as a dead link and fails the gate loudly instead of being",
+        "     fetched or read.",
+        "  3. Repository-relative links and `#anchor` links are validated the way they",
+        "     always were: against the filesystem and against the headings of the page",
+        "     being checked. This is the integrity the gate exists for, because the",
+        "     documentation set grows from one file to twenty in a single change and",
+        "     relative-link correctness cannot be assumed.",
+        "",
+        "THE DELIBERATE TRADE-OFF",
+        "External links are no longer liveness-checked, because dereferencing untrusted",
+        "URLs is precisely the vulnerability. Nothing is lost in practice: this project's",
+        "documentation cites source as plain `path:line` text rather than as hyperlinks,",
+        "and it deliberately documents a loopback-only service, so `http://127.0.0.1:3000/`",
+        "is a legitimate URL to find in its prose. Such a URL is skipped rather than",
+        "rejected - it is never dereferenced either way - so honest documentation cannot",
+        "be failed by this policy while a smuggled `file:` or `javascript:` target still",
+        "is.",
+        "",
+        "Regexes below are written with explicit character classes rather than the `i`",
+        "flag, because markdown-link-check compiles each pattern with `new RegExp(pattern)`",
+        "and passes no flags: an uppercase `HTTP://` scheme would otherwise slip past a",
+        "lowercase-only pattern."
+    ],
+
+    "ignorePatterns": [
+        {
+            "$comment": [
+                "Web links are never dereferenced. Matching here short-circuits the check",
+                "before any socket is opened, which is what removes the SSRF sink for the",
+                "entire `http`/`https` protocol family - loopback, RFC1918, link-local and",
+                "cloud-metadata addresses included. Anchored at the start of the link and",
+                "requiring the `:` immediately after the scheme, so a relative path that",
+                "merely begins with those letters (for example `httpstuff.md`) is still",
+                "checked on the filesystem."
+            ],
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?:"
+        },
+        {
+            "$comment": [
+                "Mail links are never dereferenced either. link-check validates a",
+                "`mailto:` address through node-email-verifier with `checkMx: true`, which",
+                "performs a live MX DNS lookup for whatever domain the Markdown supplies.",
+                "That is the same untrusted-input-to-network-egress problem as an HTTP",
+                "fetch, so it is short-circuited the same way."
+            ],
+            "pattern": "^[Mm][Aa][Ii][Ll][Tt][Oo]:"
+        }
+    ],
+
+    "replacementPatterns": [
+        {
+            "$comment": [
+                "Any remaining absolute URL that carries an authority - notably",
+                "`file:///etc/passwd`, but also `ftp:`, `ws:` and anything else - is",
+                "rewritten onto a repository-relative path that does not exist. The",
+                "checker then resolves it with `fs.access` inside the directory of the",
+                "page being checked, reports HTTP 400, and the gate exits non-zero. The",
+                "hostile target is never opened, and the failure is visible rather than",
+                "silently skipped. The sentinel begins with `./`, so it can never be",
+                "re-matched by a later pattern in this list."
+            ],
+            "pattern": "^[A-Za-z][A-Za-z0-9+.\\-]*://.*$",
+            "replacement": "./REJECTED-BY-LINK-POLICY-absolute-url-was-not-dereferenced"
+        },
+        {
+            "$comment": [
+                "Scheme-relative URLs such as `//169.254.169.254/latest/meta-data/`.",
+                "These carry no scheme of their own, so they escape the `ignorePatterns`",
+                "above, and resolving one against a `file:` base yields a URL with a",
+                "non-local host that the checker cannot convert to a path. Rejecting them",
+                "outright is both safer and clearer than letting that happen."
+            ],
+            "pattern": "^//.*$",
+            "replacement": "./REJECTED-BY-LINK-POLICY-scheme-relative-url-was-not-dereferenced"
+        },
+        {
+            "$comment": [
+                "Opaque absolute targets - `javascript:`, `data:`, `tel:`, a Windows",
+                "drive letter such as `C:/...`, or any other scheme without an authority.",
+                "None of these belongs in documentation, and none can be resolved as a",
+                "repository-relative link, so they are rejected. `mailto:` never reaches",
+                "this pattern because it is ignored above, and a relative path is never",
+                "caught because the pattern is anchored on a leading letter, so `./a:b.md`",
+                "passes through untouched."
+            ],
+            "pattern": "^[A-Za-z][A-Za-z0-9+.\\-]*:(?!//).*$",
+            "replacement": "./REJECTED-BY-LINK-POLICY-opaque-scheme-url-was-not-dereferenced"
+        },
+        {
+            "$comment": [
+                "Relative paths that climb above the repository root, which would let a",
+                "documentation change read arbitrary files on the machine running the",
+                "gate - the same local-file oracle as an absolute `file:` URL, just",
+                "spelled relatively. Three or more consecutive `../` segments are always",
+                "an escape: the deepest authored page sits two directories below the root",
+                "(docs/<section>/<page>.md), so `../../` already reaches the root and is",
+                "left working. Legitimate links such as `../../README.md` are therefore",
+                "unaffected."
+            ],
+            "pattern": "^.*\\.\\./\\.\\./\\.\\./.*$",
+            "replacement": "./REJECTED-BY-LINK-POLICY-path-traversal-above-repository-root"
+        }
+    ],
+
+    "$comment-retry": [
+        "Availability control (CWE-400). link-check reads the `Retry-After` header of a",
+        "429 response, multiplies it by 1000 and hands it straight to `setTimeout` with",
+        "no upper bound, so a single controlled link answering",
+        "`429 Retry-After: 31536000` would stall the gate for a year - twice over, since",
+        "it retries. Setting `retryOn429` to false makes that branch unreachable: it is",
+        "the first term of the guard around the retry. This file is loaded after the",
+        "command line is parsed, so the value here also overrides a `-r`/`--retry` flag",
+        "if one is ever reintroduced into the `docs:links` script.",
+        "",
+        "`timeout` bounds each individual check. With the policy above no request is",
+        "issued at all, so it is a backstop rather than the primary control, and it",
+        "keeps the gate bounded if a future change ever re-enables a network protocol."
+    ],
+    "retryOn429": false,
+    "timeout": "5s"
+}

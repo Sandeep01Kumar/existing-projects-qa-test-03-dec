@@ -1,31 +1,59 @@
 /**
- * @file Minimal, single-module Node.js HTTP service that answers every inbound
- * request identically with a plain-text `Hello, World!` greeting.
+ * @file Minimal, single-module Node.js HTTP service whose single request listener
+ * composes the same `200` plain-text `Hello, World!` reply for every ordinary
+ * inbound request, whatever the request's method or path.
  *
  * @module server
  *
  * @description
- * This file is the entire application: fourteen lines of executable substance
- * with no framework, no router, and no runtime dependencies. Four of its
- * properties are surprising enough to be stated outright rather than left for a
- * reader to infer from the code.
+ * This file is the entire application: 14 content lines -- 11 lines of code and
+ * 3 blank separators -- with no framework, no router, and no runtime
+ * dependencies. Four of its properties are surprising enough to be stated
+ * outright rather than left for a reader to infer from the code.
  *
- * 1. **It exports nothing.** There is no `module.exports` and no `exports.*`
- *    assignment anywhere in the file, so there is no value to import from it.
+ * 1. **It defines no public export.** There is no `module.exports` and no
+ *    `exports.*` assignment anywhere in the file. CommonJS still hands a
+ *    `require()` call the module's default, empty `module.exports` object, but
+ *    nothing meaningful can be read from it.
  * 2. **Requiring it binds a listening socket as an import-time side effect.**
  *    That side effect *is* this module's entire observable contract. Merely
  *    `require()`-ing or `import`-ing the file opens a TCP listener, so a reader
  *    who assumes the module is inert on import will bind a port by accident.
  * 3. **The request listener never inspects `req`.** Method, path, query string,
  *    headers, and body are all ignored, so no routing and no method
- *    discrimination exist and every request receives a byte-identical response.
- *    Verified by execution: `GET /`, `GET /api/anything`, and `POST /whatever`
- *    return identical status, headers, and body.
+ *    discrimination exist: this application assigns the same `200` status, the
+ *    same `text/plain` content type, and the same greeting to every request Node
+ *    dispatches to the listener through the server's `request` event. That
+ *    invariance is what the *application* controls, and it stops there: the
+ *    bytes on the wire are **not** identical from one request to the next,
+ *    because the runtime -- not this file -- frames the transport (see the
+ *    transport-behaviour list below).
  * 4. **Reachability is restricted to the local machine.** Binding the loopback
  *    hostname means no other host can reach this service at all.
  *
+ * Four transport behaviours belong to Node rather than to this file, and each
+ * one qualifies point 3 above. They are stated here so that "the same response"
+ * is never read as "the same bytes".
+ *
+ * - **A `Date` header is generated on every response.** `http.Server` sends it by
+ *   default, and its value advances with the clock, so two responses emitted in
+ *   different seconds cannot be byte-identical.
+ * - **`Connection` and `Keep-Alive` are derived from the request.** An HTTP/1.1
+ *   request that permits reuse is answered with `Connection: keep-alive` and
+ *   `Keep-Alive: timeout=5`; a request carrying `Connection: close`, and any
+ *   HTTP/1.0 request, is answered with `Connection: close` and no `Keep-Alive`.
+ *   An HTTP/1.0 reply is additionally close-delimited, so it carries no
+ *   `Content-Length` at all.
+ * - **A `HEAD` request receives the head only.** Node knows a HEAD response
+ *   carries no body, so the greeting handed to `res.end()` at L9 is discarded
+ *   and no `Content-Length` is framed. The handler itself still runs unchanged;
+ *   the suppression happens beneath it, inside the runtime.
+ * - **A `CONNECT` request never reaches the listener.** Node routes it to the
+ *   separate `connect` event, which this file does not handle, so the socket is
+ *   closed without a single response byte.
+ *
  * Line references throughout this file (`L1` through `L14`) point at the
- * original, unannotated fourteen-line layout of `server.js`. That numbering is
+ * original, unannotated 14-content-line layout of `server.js`. That numbering is
  * the canonical citation basis shared by the whole documentation corpus, so it
  * is kept deliberately even though these comment blocks shift the physical line
  * numbers of the statements they describe.
@@ -57,18 +85,29 @@
  * way to describe a callback's parameters and return value and to make that name
  * usable as a type.
  *
- * The handler runs once per inbound request and composes the reply in three
- * ordered steps: status code (L7), then response header (L8), then body plus
- * termination (L9). Status and header are set through the individual
- * `res.statusCode` property and the `res.setHeader()` call; no combined
- * status-and-headers helper is used anywhere in this file, so the head is
- * flushed implicitly by `res.end()` at L9.
+ * The handler runs once per request that Node dispatches through the server's
+ * `request` event, and composes the reply in three ordered steps: status code
+ * (L7), then response header (L8), then payload plus termination (L9). Status and
+ * header are set through the individual `res.statusCode` property and the
+ * `res.setHeader()` call; no combined status-and-headers helper is used anywhere
+ * in this file, so the head is flushed implicitly by `res.end()` at L9.
+ *
+ * Two kinds of request are answered differently, and neither difference
+ * originates here. A `CONNECT` request never reaches this function at all: Node
+ * routes it to the separate `connect` event, which this file does not handle, so
+ * the socket is closed with no response. And for a `HEAD` request Node discards
+ * the payload handed to `res.end()` before it reaches the wire, so the client
+ * receives the status line and headers with no body and no `Content-Length`.
  *
  * @param {http.IncomingMessage} req - The inbound request. **Never read.** No
  * property of it is inspected anywhere in the handler, neither `method`, `url`,
  * nor `headers`, and the body stream is never consumed. That omission is exactly
- * why every request receives the same response and why the service has no
- * routing and no method discrimination.
+ * why every request reaching this handler receives the same application-level
+ * reply -- the same status, content type, and greeting -- and why the service has
+ * no routing and no method discrimination. Node still consults the request itself
+ * when it frames the response: the `Date` header, the `Connection`/`Keep-Alive`
+ * pair, and the suppression of the body for `HEAD` all come from the runtime, not
+ * from here.
  * @param {http.ServerResponse} res - The outbound response stream the reply is
  * composed on. It is mutated in place.
  *
@@ -78,15 +117,40 @@
  * @listens http.Server#event:request
  *
  * @example
- * // Every request produces this same exchange, whatever its method or path:
+ * // One illustrative exchange. Any ordinary body-bearing request -- whatever its
+ * // method, path, or query -- is answered with the same status, content type, and
+ * // greeting, so the handler's contribution is invariant; the header block below
+ * // is representative rather than exhaustive:
  * //   $ curl -i -X POST 'http://127.0.0.1:3000/any/path?ignored=1'
  * //   HTTP/1.1 200 OK
  * //   Content-Type: text/plain
+ * //   Date: Tue, 04 Aug 2026 11:51:48 GMT
  * //   Connection: keep-alive
  * //   Keep-Alive: timeout=5
  * //   Content-Length: 14
  * //
  * //   Hello, World!
+ * //
+ * // Only the status line, the `Content-Type` line, and the body come from this
+ * // handler; `Content-Length` is derived by Node from that body. `Date` is
+ * // generated by Node and changes on every response, and the
+ * // `Connection`/`Keep-Alive` pair reflects the request's protocol version and
+ * // its own `Connection` header -- so the wire bytes differ between requests
+ * // even though the application-level reply does not. A `CONNECT` request never
+ * // reaches this handler and receives no response at all.
+ *
+ * @example
+ * // `HEAD` is the one method whose reply differs structurally. The handler runs
+ * // exactly as above, but Node discards the body it was given and frames no
+ * // `Content-Length`:
+ * //   $ curl -i -I http://127.0.0.1:3000/
+ * //   HTTP/1.1 200 OK
+ * //   Content-Type: text/plain
+ * //   Date: Tue, 04 Aug 2026 11:51:48 GMT
+ * //   Connection: keep-alive
+ * //   Keep-Alive: timeout=5
+ * //
+ * //   (no body)
  */
 /**
  * @callback ServerStartupCallback
@@ -101,11 +165,13 @@
  * Node invokes it exactly once, after the socket has been bound successfully and
  * the server has begun accepting connections. Its whole body is the single
  * `console.log` at L13, which writes the readiness banner to **stdout**; that
- * write is its only effect. It performs no health check, validates nothing,
- * reads no state, and returns no value. If the bind fails instead, for example
- * with `EADDRINUSE` when port 3000 is already held by another process, this
- * callback is never reached, because the failure surfaces as an `error` event
- * that this file deliberately does not handle.
+ * write is its only effect. The banner is interpolated from the two immutable
+ * constants the callback closes over, `hostname` (L3) and `port` (L4), and those
+ * are the only state it reads. It performs no health check, validates nothing,
+ * queries no runtime state, and returns no value. If the bind fails instead, for
+ * example with `EADDRINUSE` when port 3000 is already held by another process,
+ * this callback is never reached, because the failure surfaces as an `error`
+ * event that this file deliberately does not handle.
  *
  * @returns {void} Nothing; the banner is emitted purely as a side effect.
  *
@@ -135,20 +201,17 @@ const http = require('http'); // Loads Node's built-in HTTP module; a core modul
  *
  * Binding `127.0.0.1` rather than `0.0.0.0` confines the listener to the loopback
  * interface, and that has a consequence which matters more than any other single
- * line in this file: **the service is unreachable from any other machine.**
- * Confirmed empirically -- a request to the host's non-loopback address on port
- * 3000 receives no response at all, while `127.0.0.1:3000` responds normally.
+ * line in this file: **the service is unreachable from any other machine.** Only
+ * clients running on this host can reach it directly; a request addressed to any
+ * of the host's non-loopback addresses never arrives at this listener.
  *
- * There is no environment-variable override. The value is a compile-time literal,
- * so changing it means editing this line and restarting the process. Fronting the
- * service with a reverse proxy is preferable to widening the bind address.
+ * There is no environment-variable override. The value is a hard-coded source
+ * literal, so changing it means editing this line and restarting the process.
+ * Fronting the service with a reverse proxy is preferable to widening the bind
+ * address.
  *
  * @constant {string}
  * @default '127.0.0.1'
- * @see docs/getting-started/configuration.md -- owning document for both
- * configuration options.
- * @see docs/guides/deployment.md -- owning document for the loopback constraint
- * and the reverse-proxy alternative.
  */
 const hostname = '127.0.0.1'; // The IPv4 loopback literal; scopes reachability to this machine only.
 /**
@@ -160,13 +223,11 @@ const hostname = '127.0.0.1'; // The IPv4 loopback literal; scopes reachability 
  * non-zero without ever printing the readiness banner.
  *
  * As with `hostname` there is no environment-variable override -- the value is a
- * compile-time literal, so changing it means editing this line and restarting.
+ * hard-coded source literal, so changing it means editing this line and
+ * restarting.
  *
  * @constant {number}
  * @default 3000
- * @see docs/getting-started/configuration.md -- owning document for both
- * configuration options.
- * @see docs/guides/troubleshooting.md -- port-conflict remediation.
  */
 const port = 3000; // The TCP port the listener will bind.
 
@@ -175,12 +236,14 @@ const port = 3000; // The TCP port the listener will bind.
  *
  * Produced by the factory `http.createServer([options][, requestListener])`. The
  * single argument supplied here is the `requestListener`, whose signature is
- * documented as {@link RequestHandler}; Node registers it for the server's
- * `request` event, so it runs once per inbound request.
+ * documented as {@link module:server~RequestHandler|RequestHandler}; Node
+ * registers it for the server's `request` event, so it runs once per inbound
+ * request.
  *
  * Construction alone does **not** open a socket. The server stays idle until
  * `server.listen()` is called at L12, which is where the port is actually bound
- * and where the {@link ServerStartupCallback} is supplied.
+ * and where the
+ * {@link module:server~ServerStartupCallback|ServerStartupCallback} is supplied.
  *
  * @constant {http.Server}
  * @type {http.Server}
@@ -190,7 +253,7 @@ const port = 3000; // The TCP port the listener will bind.
 const server = http.createServer((req, res) => { // Instantiates an http.Server and registers the per-request listener.
   res.statusCode = 200; // Sets the status line; must precede any body byte written.
   res.setHeader('Content-Type', 'text/plain'); // Declares the payload MIME type; must precede res.end.
-  res.end('Hello, World!\n'); // Writes the 14-byte body and ends the response, flushing the implicit head.
+  res.end('Hello, World!\n'); // Supplies the 14-byte body and terminates the response, flushing the implicit head; for a HEAD, Node discards that body.
 }); // Closes the request-listener body and the createServer invocation.
 
 server.listen(port, hostname, () => { // Binds the socket and begins accepting connections; async, fires on 'listening'.
