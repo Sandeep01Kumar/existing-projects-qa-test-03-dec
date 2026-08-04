@@ -16,11 +16,18 @@ and `README.md`.
 
 ## Why this repository contains non-application files
 
-The service is 14 lines of Node.js that answers every request with the same
-14 bytes. The repository around it is considerably more varied, and that is on
-purpose. Its stated identity is `hao-backprop-test`, a "test project for
-backprop integration" — Source: `README.md:L1-L2`. It exists to be *processed*
-by tooling, not to be shipped as a product.
+The service is 14 lines of Node.js that answers every ordinary request reaching
+its *request listener* with the same status, the same content type and the same
+14-byte greeting; the exceptions Node handles itself, and the framing that
+varies per request, are owned by
+[api/http-api.md](api/http-api.md). The repository around it is considerably
+more varied, and that is on purpose. Its stated identity is
+`hao-backprop-test`, a "test project for backprop integration" — the tagline
+carried by lines 1 and 2 of the **pre-documentation** `README.md`, the
+two-line placeholder this documentation pass replaced (repository baseline
+commit `5b4acbb`; the current `README.md:L2` is blank, so that text is no
+longer readable at those lines). It exists to be *processed* by tooling, not to
+be shipped as a product.
 
 Tooling that walks a repository has to cope with far more than one language and
 one encoding: text and binary, tiny and enormous, well-formed and deliberately
@@ -65,10 +72,36 @@ files can be quoted from a single verified snapshot.
 | `test.txt.txt` | 0 | 0 | Fixture — empty plain text |
 
 Sizes were read with `stat -c '%s' <file>` and line counts with `wc -l <file>`,
-both read-only. Six of the ten rows are fixtures and are documented one by one
-below. The remaining four — `server.js`, `package.json`, `package-lock.json` and
-`README.md` — are the application and its metadata, and this page deliberately
-stops at naming them.
+both read-only, both on Linux. `stat -c` is the GNU form and is **not**
+portable, so the same measurements elsewhere are:
+
+| Platform | Exact byte size of a file |
+| --- | --- |
+| Linux (GNU coreutils) | `stat -c '%s' <file>` |
+| macOS and the BSDs | `stat -f '%z' <file>` |
+| Windows PowerShell | `(Get-Item <file>).Length` |
+| Any of the three | `node -e "console.log(require('fs').statSync('<file>').size)"` |
+
+Only the Linux row and the Node form were executed for this page; the other two
+are given without captured output rather than with invented output. The Node form
+was checked against the table above and reports the same bytes, which is worth
+knowing because Node is the one program this repository already requires:
+
+```bash
+node -e "for (const f of ['sample.doc','demo.jpg','100Pages.pdf']) console.log(require('fs').statSync(f).size, f)"
+```
+
+```text
+98304 sample.doc
+2123398 demo.jpg
+9456545 100Pages.pdf
+```
+
+Every size in this page is quoted in **exact bytes** precisely so that it does
+not depend on which of those commands a reader has. Six of the ten rows are
+fixtures and are documented one by one below. The remaining four —
+`server.js`, `package.json`, `package-lock.json` and `README.md` — are the
+application and its metadata, and this page deliberately stops at naming them.
 
 `server.js` in particular is described here only by its shape: **14 content
 lines, being 11 lines of code and 3 blank separators.** What those lines do is
@@ -189,8 +222,11 @@ tooling that wants some data to work on, and nothing more.
 
 ## test.txt.txt
 
-**Exactly zero bytes, on purpose.** `wc -c` and `stat -c '%s'` both report `0`,
-and `file` reports it simply as `empty`.
+**Exactly zero bytes, on purpose.** On Linux, `wc -c` and `stat -c '%s'` both
+report `0`, and `file` reports it simply as `empty`. The portable check is the
+same one used for every other size on this page —
+`node -e "console.log(require('fs').statSync('test.txt.txt').size)"` prints `0`
+on any platform.
 
 The emptiness is the fixture. A zero-length file exercises the empty-input path
 in anything that reads, parses, hashes or uploads a file — the path that is
@@ -217,7 +253,14 @@ None is text, none is human-readable in a diff, and none is read by the service.
 | `100Pages.pdf` | 9,456,545 | 9.5 MB | `PDF document, version 1.7` | Multi-page document handling, and the largest single file in the repository |
 
 Formats in the table were identified with `file <name>`, and byte counts with
-`stat -c '%s' <name>` — both read-only. The filename `100Pages.pdf` advertises
+`stat -c '%s' <name>` — both read-only, both on Linux. `file` is a Unix utility:
+it is present on Linux and macOS, and on Windows it is not, so a reader there can
+confirm a format from the byte counts and the format names above rather than by
+re-running the command. The byte counts themselves are portable through the
+`node -e` form given in
+[Complete repository inventory](#complete-repository-inventory).
+
+The filename `100Pages.pdf` advertises
 its page count, but this documentation does not assert one: the file is a
 PDF 1.7 that stores its page objects in compressed object streams, so the count
 cannot be confirmed without decompressing it, and an unverified number has no
@@ -236,8 +279,9 @@ So 98,304 bytes is 98 KB, 2,123,398 bytes is 2.1 MB, and 9,456,545 bytes is
 ever load-bearing.
 
 A reader who checks with `du -h` will see different numbers, and the
-documentation is not wrong. `du -h` reports **binary** units — 1 KiB = 1,024
-bytes, 1 MiB = 1,048,576 bytes — while labelling them `K` and `M`:
+documentation is not wrong. `du` is a Unix utility — Linux and macOS have it,
+Windows does not — and `du -h` reports **binary** units, 1 KiB = 1,024 bytes and
+1 MiB = 1,048,576 bytes, while labelling them `K` and `M`:
 
 ```bash
 du -h sample.doc demo.jpg 100Pages.pdf
@@ -259,9 +303,12 @@ widens with size, which is why `100Pages.pdf` reads 9.5 MB decimal but 9.1M from
 `du`. `demo.jpg` happens to read `2.1` in both conventions — a coincidence at
 that magnitude, not a sign that it is the one file the two agree on.
 
-`ls -lh` uses the same binary units as `du -h` and agrees with it. If a size
-matters, read the exact byte count with `stat -c '%s' <file>` and compare
-against the **Exact bytes** column, which is unit-free.
+`ls -lh` — Unix again, and again absent on Windows — uses the same binary units
+as `du -h` and agrees with it. PowerShell's `Get-ChildItem` sidesteps the whole
+question by reporting a raw `Length` in bytes, as does the `node -e` form above.
+If a size matters, read the exact byte count with whichever of those your
+platform has and compare it against the **Exact bytes** column, which is
+unit-free by design.
 
 ## Preservation policy
 

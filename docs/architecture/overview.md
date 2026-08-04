@@ -38,7 +38,7 @@ flowchart LR
             L --> H
         end
     end
-    C -->|"any method, any path"| L
+    C -->|"ordinary request, any path"| L
     H -->|"200 text/plain Hello, World!"| C
 %% One process, one listener, one client. No database, cache, queue,
 %% load balancer or second service exists in this system.

@@ -8,7 +8,10 @@ application's only source file, so this page derives from a two-line span of
 it. Every command shown below was executed and every transcript is the literal
 output it produced.
 
-Source files this page derives from: `server.js:L3-L4`.
+Source files this page derives from: `server.js:L1-L14`, the whole module. The
+two options are declared at `server.js:L3-L4`, consumed at `server.js:L12-L13`,
+and the absence of any environment-variable indirection is a property of the file
+as a whole rather than of either declaration.
 
 ## The configuration model
 
@@ -72,6 +75,14 @@ both feed `server.listen`, and both feed the banner. It is why an override
 takes a restart, and why a successful override is visible in the very first
 line the process prints.
 
+Neither value can be supplied from outside the file, and that includes supplying
+it from code. The module exports nothing — there is no `module.exports` anywhere
+in `server.js` — so configuration cannot be injected by importing the module:
+requiring it yields an empty exports object and, as a side effect of the import,
+binds the socket using the constants already compiled in.
+`Source: server.js:L1-L14` Editing the constants is therefore the only mechanism
+there is.
+
 ## Option: hostname
 
 Default `'127.0.0.1'`, written in the source as a single-quoted string literal.
@@ -110,8 +121,10 @@ started while the first still held the port:
 Error: listen EADDRINUSE: address already in use 127.0.0.1:3000
 ```
 
-The error object carries the specifics, and the two values it names are exactly
-the two constants documented on this page:
+The stack frames that sit between that line and the block below are omitted here
+because [../guides/troubleshooting.md](../guides/troubleshooting.md) owns the
+complete transcript. The error object carries the specifics, and the two values
+it names are exactly the two constants documented on this page:
 
 ```text
   code: 'EADDRINUSE',
@@ -124,9 +137,11 @@ the two constants documented on this page:
 
 Both blocks above are excerpts from the failing process's standard error. It
 exited with status `1` and wrote nothing to standard output, so no banner
-appears — a missing banner is the symptom. The full transcript with its stack
-frames, and the per-platform commands for finding and freeing whatever holds
-the port, are owned by
+appears — a missing banner is the symptom. `errno` is platform-specific — `-98`
+on Linux — while the code, the syscall, and the address and port are the stable
+parts worth matching on. The full transcript with its stack frames, and the
+per-platform commands for finding and freeing whatever holds the port, are owned
+by
 [../guides/troubleshooting.md](../guides/troubleshooting.md).
 
 This value is likewise interpolated into the startup banner.
@@ -165,9 +180,9 @@ The procedure is four steps:
 [installation.md](installation.md) owns the run and stop commands. The run
 command is a single line:
 
-```bash
-node server.js
-```
+   ```bash
+   node server.js
+   ```
 
 The change takes effect **only on restart**. Each constant is evaluated once,
 when the module is loaded, and the module is loaded once per process; the file
@@ -180,16 +195,47 @@ output. Because the banner is a template literal over both constants rather
 than a hardcoded string, whatever is in force appears there immediately.
 `Source: server.js:L13`
 
-At the defaults, that line is:
+Captured output **after** that edit — the banner names 8080, not 3000:
 
 ```text
-Server running at http://127.0.0.1:3000/
+Server running at http://127.0.0.1:8080/
 ```
 
-Change `port` to `8080` and the same command prints the same sentence with
-`8080` in place of `3000`, because the banner is built from the constant rather
-than repeating it. A banner still showing the old value means the process was
-never restarted.
+It reports the new value because it is interpolated from the constant rather
+than written out a second time, so the banner always names the port actually in
+force. `Source: server.js:L13`
+
+**The repository itself ships `3000`**, so no run of the committed source can
+print `8080`: the transcript above was captured from a copy whose `port`
+constant had been changed exactly as this procedure describes.
+
+The service now answers there and nowhere else. Captured against the edited
+file:
+
+```bash
+curl -i --noproxy '*' --max-time 5 http://127.0.0.1:8080/
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: text/plain
+Date: Tue, 04 Aug 2026 20:22:56 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+Content-Length: 14
+
+Hello, World!
+```
+
+The same request to port 3000 fails with `curl` exit code 7, because nothing is
+listening there any more. The response contract itself is unchanged — only the
+port moved — and it is owned by [../api/http-api.md](../api/http-api.md).
+
+The banner for the **unedited** default is in
+[installation.md](installation.md), which owns the run step; it is deliberately
+not repeated inside this procedure, so that the output shown here is the output
+this procedure actually produces. A banner still showing the old value means the
+process was never restarted.
 
 ## Why there is no environment-variable support
 
@@ -198,15 +244,51 @@ outright rather than leaving to inference, because reading a port from the
 environment is close to universal in Node services, and assuming this one does
 it costs real debugging time.
 
-Verified, with no other instance running:
+Verified, with no other instance running. The command below uses POSIX
+inline-environment syntax, so it runs as written on Linux and macOS:
 
 ```bash
 PORT=8080 node server.js
 ```
 
+Captured output — the banner still reports `3000`:
+
 ```text
 Server running at http://127.0.0.1:3000/
 ```
+
+The other half of the same observation is that nothing is listening on 8080:
+
+```bash
+curl --noproxy '*' --include --silent --show-error --max-time 5 http://127.0.0.1:8080/; echo "curl exit code: $?"
+```
+
+```text
+curl exit code: 7
+```
+
+`curl` printed no response line at all before that, because exit code 7 is
+"failed to connect". Meanwhile `127.0.0.1:3000` answered normally throughout:
+
+```bash
+curl --noproxy '*' --silent --show-error --max-time 5 http://127.0.0.1:3000/; echo "curl exit code: $?"
+```
+
+```text
+Hello, World!
+curl exit code: 0
+```
+
+The command therefore starts the service on port 3000, exactly as if the
+variable had not been set: nothing consumes it. Stopping that process is the
+ordinary procedure — `Ctrl+C` in its terminal, which is an immediate termination
+because no shutdown handler exists — and the port is released as it exits; see
+[installation.md](installation.md), which owns the run and stop steps.
+
+Windows shells have no inline-prefix form, so the equivalent demonstrations
+there are `$env:PORT=8080; node server.js` in PowerShell and
+`set PORT=8080 && node server.js` in `cmd`. Both print the same banner, for the
+same reason: the value is set, and then nothing reads it.
 
 The variable was set and had no effect whatsoever: the banner reports `3000`.
 Running the portable port check from

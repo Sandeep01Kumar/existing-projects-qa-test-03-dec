@@ -25,7 +25,7 @@ before the symbol entries rather than after them.
 | Module system | CommonJS |
 | Module name in JSDoc | `server`, declared with `@module` — `Source: server.js:L1-L14` |
 | Exports | **None.** There is no `module.exports` and no `exports.*` assignment anywhere in the file |
-| Observable contract | A side effect at import time: evaluating the module binds a listening TCP socket on `127.0.0.1:3000` — `Source: server.js:L12` |
+| Observable contract | A side effect at import time: evaluating the module initiates listening on `127.0.0.1:3000`, and the successful bind is signalled asynchronously by the *startup callback* — `Source: server.js:L12-L14` |
 | Runtime dependencies | None. The only import is Node's built-in `http` module — `Source: server.js:L1` |
 | Declared dependency tag | `@requires http` |
 
@@ -36,8 +36,28 @@ below, and not one of them assigns an export. `Source: server.js:L1-L14`
 
 That inverts the usual expectation for a module. `require('./server.js')`
 returns CommonJS's default, empty `module.exports` object, so nothing
-meaningful can be read from it — but the call is not harmless. By the time it
-returns, `server.listen()` has already bound a socket. `Source: server.js:L12`
+meaningful can be read from it — but the call is not harmless. Evaluating the
+file runs `server.listen()`, which **initiates** the bind.
+`Source: server.js:L12`
+
+**`require()` returning does not mean the server is ready.** `server.listen()`
+is asynchronous: it starts the bind and returns immediately, and the socket
+becomes ready afterwards, on a later turn of the event loop. Node signals that
+moment by emitting the `listening` event, which is what invokes the *startup
+callback* and prints the banner. `Source: server.js:L12-L14` Two rules follow,
+and they matter to anything that automates a start:
+
+- **Never infer readiness from `require()` (or `import`) returning.** At that
+  instant the bind may still be in flight, so a request issued immediately
+  afterwards can be refused.
+- **Wait for the `listening` signal instead** — the banner on stdout is the
+  observable form of it — or poll the port until it accepts a connection.
+  What that signal does and does not prove is set out under
+  [Callback: ServerStartupCallback](#callback-serverstartupcallback).
+
+The same asynchrony applies to the failure path: a bind that cannot succeed
+fails after `require()` has already returned, surfacing as an `error` event that
+this module does not handle rather than as an exception the caller could catch.
 
 **A reader who imports this file expecting an inert module will bind a port by
 accident.** There is no exported factory to call, no `createServer`-style
@@ -145,8 +165,8 @@ documentation toolchain.
 | Source | `Source: server.js:L3` |
 
 The IPv4 loopback address the listener binds. It is passed to `server.listen()`
-as the second argument and interpolated into the readiness banner.
-`Source: server.js:L12`
+as the second argument, `Source: server.js:L12`, and interpolated into the
+readiness banner one line later, `Source: server.js:L13`.
 
 Binding the loopback literal rather than a wildcard address is the *loopback
 binding*, and its consequence — that no other machine can reach the service at
@@ -169,9 +189,9 @@ literal, so changing it means editing the line and restarting the process.
 | Default | `3000` |
 | Source | `Source: server.js:L4` |
 
-The TCP port the listener binds, passed to `server.listen()` as the first
-argument and interpolated into the readiness banner.
-`Source: server.js:L12`
+The TCP port the listener binds. It is passed to `server.listen()` as the first
+argument, `Source: server.js:L12`, and interpolated into the readiness banner
+one line later, `Source: server.js:L13`.
 
 The port must be free when the process starts. A conflict is the module's one
 routine startup failure: the bind fails with `EADDRINUSE`, and because the file
@@ -199,16 +219,29 @@ instance runs entirely on Node's defaults. `Source: server.js:L6`
 
 The listener supplied is the *request listener*, whose signature is documented
 as `RequestHandler` below. Node registers it for the server's `request` event,
-so it runs once per inbound request.
+so it runs once per request that Node dispatches through that event — which is
+not the same as once per inbound connection or once per byte sequence a client
+sends. A `CONNECT` goes to the `connect` event instead, and a request carrying
+an unsupported `Expect` header is answered by Node before the listener is
+consulted; neither reaches this function, and a request Node's parser rejects is
+answered by the runtime before any dispatch happens at all.
+`Source: server.js:L6` Those cases are enumerated in
+[http-api.md](http-api.md), which owns the HTTP contract.
 
 Construction alone does **not** open a socket. The instance stays idle until
 `server.listen()` is called, which is where the port is actually bound and where
 the *startup callback* is supplied. `Source: server.js:L12`
 
-Nothing else is attached to the instance: no `error` handler, no `close`
-handler, no timeout override, and no second listener of any kind. Its behaviour
-is therefore exactly Node's default behaviour, which is what makes the failure
-mode described under `port` above an unhandled event rather than a handled one.
+Application code registers exactly two functions on this instance: the one
+*request listener* passed to `http.createServer()` at `Source: server.js:L6`,
+and the *startup callback* passed to `server.listen()` at
+`Source: server.js:L12`, which Node registers as a one-shot `listening`
+listener. Nothing else is attached — no `error` handler, no `close` handler, no
+`connect`, `upgrade`, `checkContinue`, `checkExpectation` or `clientError`
+handler, no timeout override, and no second listener on any of those events. Its
+behaviour is therefore exactly Node's default behaviour, which is what makes the
+failure mode described under `port` above an unhandled event rather than a
+handled one.
 
 ## Callback: RequestHandler
 
@@ -220,7 +253,7 @@ registered on the server. `Source: server.js:L6-L10`
 | Kind | `@callback` typedef |
 | Namepath | `module:server~RequestHandler` |
 | Listens to | `http.Server#event:request` |
-| Invoked | Once per request Node dispatches to the listener |
+| Invoked | Once per request Node dispatches through the server's `request` event |
 | Returns | `void` |
 | Source | `Source: server.js:L6-L10` |
 
@@ -239,7 +272,23 @@ simplification: the handler body contains no read of `req` at all.
 That single omission is what produces the *catch-all response*. With nothing
 read from the request, no code exists that could branch on a method, a path, a
 query string, a header, or a body, so there is no routing and no method
-discrimination to document.
+discrimination to document for the requests this handler receives.
+
+That last qualifier is deliberate. It is the handler that treats every request
+alike; it is not true that every request a client sends is treated alike,
+because Node decides what becomes a `request` event before this function is
+reached — a `CONNECT` never arrives here, an unsupported `Expect` header is
+refused by Node itself, and a `HEAD` reply has its body discarded beneath the
+handler. The full list, with captured evidence, is owned by
+[http-api.md](http-api.md).
+
+The invariance that follows is the *application's*, and it reaches exactly as
+far as this handler does. Two requests never reach it — `CONNECT`, which Node
+routes to the `connect` event, and anything Node's parser rejects — and for a
+`HEAD` request Node discards the body this handler wrote before it reaches the
+wire. The externally observable consequences of all three, and the headers Node
+frames around the reply, are owned by
+[http-api.md](http-api.md). `Source: server.js:L6-L10`
 
 ### Return value
 
@@ -300,10 +349,31 @@ and `port` constants, so it always reports the values actually in force rather
 than a second hardcoded copy of them. Change either constant and the banner
 follows. `Source: server.js:L13`
 
-Because the callback is bound to successful binding, it is also a negative
-signal: if the bind fails — `EADDRINUSE`, for instance — the callback is never
-reached and no banner appears. Seeing the banner therefore means the socket is
-open, and not seeing it means it is not.
+### What the banner proves, and what it does not
+
+The banner is a **one-way, one-time** signal, and treating it as anything more
+is the most common mistake made with this module. It is written once, from
+inside a callback that Node only invokes after the bind has succeeded, and it is
+never written again.
+
+| Observation | What it establishes |
+| --- | --- |
+| The banner appeared | The bind succeeded and the server began accepting connections **at that moment**. This is sound: the callback is unreachable unless the `listening` event fired — `Source: server.js:L12-L14` |
+| The banner has not appeared | **Nothing conclusive.** The bind may still be in flight, since `server.listen()` is asynchronous; or stdout may have been redirected, discarded, or simply not observed by whoever is looking; or the process may indeed have failed to bind |
+| The banner appeared earlier | Nothing about *now*. The process may have exited or been killed in the meantime, and no second line is ever written to say so |
+
+The asymmetry has one cause: the banner reports an event, not a state. There is
+no heartbeat, no shutdown message, and no `error` handler that would print a
+failure — a failed bind produces an unhandled `error` event instead, which is
+why a crash is visible as a stack trace on stderr rather than as a line from
+this callback.
+
+So use the banner for what it is — confirmation that a start succeeded — and use
+an active check for anything else. Whether the service is listening *now* is
+answered by looking for a live process, by opening a TCP connection to the port,
+or by issuing an HTTP request and comparing the reply against the documented
+contract. All three, and their limits, are covered by
+[../guides/troubleshooting.md](../guides/troubleshooting.md).
 
 ## Why both callbacks are @callback typedefs
 
@@ -320,9 +390,19 @@ anywhere outside the argument list it is written in: one is passed straight into
 An ordinary JSDoc block documents a *named* thing — it sits above a declaration
 and binds to the identifier it finds there. With an anonymous expression there
 is no identifier to bind to, so a plain block has nothing to attach itself to
-and the function goes undocumented. `@callback` typedefs are therefore
-**mandatory here rather than optional**: without them the two functions could
-not be documented at all, and they are the only two functions in the module.
+and the function goes undocumented.
+
+`@callback` typedefs are therefore **the required approach here**, and the
+reason is a project constraint rather than a limit of JSDoc. JSDoc does offer
+other ways to document a function that has no identifier of its own — an
+explicit `@name`, an `@function` block with a supplied namepath, or a
+`@type {function(...)}` annotation on a declaration the function is assigned to
+— but each of those either invents a name that appears nowhere in the source or
+requires the function to be given one, and giving these two functions a name
+means editing an executable line. This work is comment-only, so the two
+techniques that leave the eleven executable lines byte-identical are `@callback`
+and `@typedef`, and `@callback` is the one the standard defines for exactly this
+case. It is the standards-conformant choice, not the only mechanism that exists.
 
 The technique is standards-based, not improvised. JSDoc's own `@callback`
 reference defines the tag as describing a callback function's parameters and
@@ -373,10 +453,37 @@ annotations mechanically, which is useful for spotting drift between this page
 and the source, but nothing here depends on it having been run.
 
 The generator is configured by `jsdoc.json` at the repository root, whose only
-source input is `server.js`, and it is invoked through the `docs:api` script:
+source input is `server.js`, and it is invoked through the `docs:api` script.
+
+**Install the dev dependencies first.** `jsdoc` is a declared devDependency, so
+on a freshly cloned tree with no `node_modules/` the script has no generator to
+run and fails immediately. One install is enough, and
+[../getting-started/installation.md](../getting-started/installation.md) owns
+that step in full — including why the *runtime* needs nothing installed:
+
+```bash
+npm install
+npm run docs:api
+```
+
+Use `npm ci` in place of `npm install` where you want the lockfile honoured
+exactly. On a tree where the toolchain is already installed, run the second
+command alone:
 
 ```bash
 npm run docs:api
+```
+
+Skipping the install produces this, captured on a copy of the repository with no
+`node_modules/` directory — the runtime preflight passes and the generator is
+simply absent, and the script exits 127:
+
+```text
+> hello_world@1.0.0 docs:api
+> node tools/check-doc-runtime.js && jsdoc -c jsdoc.json
+
+documentation toolchain runtime check: node v22.23.2 satisfies devEngines.runtime ">=22.12.0"
+sh: 1: jsdoc: not found
 ```
 
 Captured output of that run:
@@ -403,8 +510,49 @@ source actually says.
 
 An **optional** second script, `docs:md`, renders the same annotations as
 Markdown into the same git-ignored directory. It is a convenience for comparing
-the generated text against this page when checking for drift, and nothing in the
-corpus requires it.
+the generated text against this page when checking for drift, and nothing in
+the corpus requires it: this page is authored and committed, and neither
+documentation gate invokes the script.
+
+### The supply-chain trade-off in docs:md
+
+Where the two generators come from differs, and that difference is a security
+property rather than a packaging detail. `docs:api` runs `jsdoc`, a declared
+devDependency resolved through `package-lock.json`, so every package it loads
+is pinned to an exact version and checked against a recorded integrity hash.
+`docs:md` instead fetches its generator at run time:
+
+```bash
+npx --yes --ignore-scripts jsdoc-to-markdown@9.1.3 --files server.js
+```
+
+Three consequences follow, and together they are why the script stays optional:
+
+- **The pin is shallow.** `@9.1.3` fixes the top-level package and nothing
+  below it. `npx` resolves that package's transitive dependencies against the
+  registry on any machine that has not cached them, with no lockfile and no
+  integrity pinning, so two runs on different days can execute a different
+  closure of third-party code (CWE-494). `docs:api` cannot drift that way.
+- **It reaches the network and then executes what arrives.** Unlike `docs:api`,
+  the first run on a machine downloads code rather than relying on a prior
+  `npm install`, and that code then runs locally. `--ignore-scripts` is
+  load-bearing: it stops the fetched packages' lifecycle scripts from running
+  during resolution. It does not sandbox the generator itself, which still
+  executes with the privileges of whoever invoked it.
+- **So treat it as a manual, disposable-environment tool.** Run it when you
+  actually want a fresh rendering — in a container or a throwaway workspace,
+  under an unprivileged account, never as `root`, and never inside an automated
+  gate. `docs:lint`, `docs:links` and `docs:check` never call it.
+
+To make the rendering reproducible, lock the generator outside this repository
+rather than declaring it inside: in a throwaway directory run `npm init -y`,
+then `npm install --save-exact --ignore-scripts jsdoc-to-markdown@9.1.3`, which
+writes a lockfile carrying an integrity hash for every package in the closure,
+and run the local binary from there against this repository's `server.js`.
+
+Keeping the generator undeclared here is deliberate. It is optional tooling, so
+it stays out of `devDependencies` and out of the lockfile, and the three
+declared devDependencies remain the whole of the required toolchain.
 
 ## See also
 

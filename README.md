@@ -88,7 +88,7 @@ flowchart LR
             L --> H
         end
     end
-    C -->|"any method, any path"| L
+    C -->|"ordinary request, any path"| L
     H -->|"200 text/plain Hello, World!"| C
 %% One process, one listener, one client. No database, cache, queue,
 %% load balancer or second service exists in this system.
@@ -112,17 +112,27 @@ flushed. For the diagrams that break those two paths down step by step, see
 
 ## Prerequisites
 
-Node.js is the only prerequisite. The manifest declares the supported floor in
-its `engines.node` field:
+**Running the service** needs Node.js and nothing else. **Following this
+README end to end** needs two more programs, listed rather than assumed because
+a minimal container image or a fresh Windows install may have neither: Git, to
+clone the repository once, and curl, for the verification request — and curl is
+optional, because a Node-only equivalent is given in
+[docs/getting-started/installation.md](docs/getting-started/installation.md).
 
 | Requirement | Value | Why |
 | --- | --- | --- |
-| Node.js floor | `>=18` | Covers the core `http` API surface this module uses, and is declared in `package.json` as `engines.node` |
+| Node.js floor | `>=18` | Covers the core `http` API surface this module uses, and is declared in `package.json` as `engines.node`. A functional floor only — it says nothing about security support |
+| Node.js to actually run | a line still receiving security patches: Node 22, 24 or 26 as this is written | Node 18 and Node 20 satisfy the floor and are **end-of-life**, so they receive no security fixes. Do not use an end-of-life runtime for security-sensitive or network-reachable operation |
 | Node.js verified | `v22.23.2` | The version this documentation was written and verified against |
 | npm verified | `11.18.0` | Used for the install and script runs quoted throughout |
+| Git | any current version | One `git clone`; no floor is declared |
+| curl | any current version, optional | One plain `GET`; a Node-only alternative is documented |
 
-The floor is the contract; the verified versions are an observation. Check your
-toolchain:
+The floor is the contract, the verified versions are an observation, and the
+second row is a security requirement that no manifest field expresses — nothing
+warns you when you are on an end-of-life runtime, because it satisfies `>=18`.
+[docs/getting-started/installation.md](docs/getting-started/installation.md)
+carries the support dates. Check your toolchain:
 
 ```bash
 node --version
@@ -142,11 +152,19 @@ including what to do when your Node.js version is older than the floor. See
 
 ## Installation
 
-Clone the repository and enter it. The clone URL depends on where you are
-reading this from, so substitute your own remote:
+Clone the repository and enter it. **This block is a template** — the clone URL
+depends on where you are reading this from, so paste your own remote into the
+first line. Holding it in a quoted variable and naming the destination directory
+explicitly is what makes the block copy-pasteable: a bare
+`git clone <repository-url>` is not valid shell at all, because `<` and `>` are
+redirection operators. The `--` ends Git's option parsing, which quoting cannot
+do, so a URL beginning with `-` cannot be read as an option;
+[docs/getting-started/installation.md](docs/getting-started/installation.md) owns
+the full rationale.
 
 ```bash
-git clone <repository-url>
+REPOSITORY_URL="paste your clone URL here"
+git clone -- "$REPOSITORY_URL" hao-backprop-test
 cd hao-backprop-test
 ```
 
@@ -177,10 +195,12 @@ you can confirm without uninstalling anything:
 npm ls --omit=dev --depth=0
 ```
 
-Captured output:
+Captured output, with one substitution marked in the transcript itself — the
+absolute path is machine-specific, so `<your repository root>` stands where the
+captured run printed this clone's own path:
 
 ```text
-hello_world@1.0.0 /path/to/hao-backprop-test
+hello_world@1.0.0 <your repository root>
 └── (empty)
 ```
 
@@ -198,17 +218,24 @@ configuration file, no `.env`, and no environment variable of any kind is read.
 | `hostname` | `127.0.0.1` | `server.js:L3` | IPv4 loopback. Confines reachability to the local machine |
 | `port` | `3000` | `server.js:L4` | TCP port the listener binds |
 
-To change either one, edit the constant and restart the process:
+To change either one, edit the constant and restart the process. After changing
+`port` to `8080`, the banner names the new port, because it is interpolated from
+the constant rather than written out a second time:
 
 ```bash
 node server.js
 ```
 
+```text
+Server running at http://127.0.0.1:8080/
+```
+
 There is no reload mechanism, so a running process keeps its old values until it
 is stopped and started again. The absence of environment-variable support is
 deliberate rather than accidental: the module reads `process.env` nowhere, so
-`PORT=8080 node server.js` has no effect whatsoever — a surprise worth knowing
-before you debug a port that never changes.
+`PORT=8080 node server.js` — POSIX syntax, and `$env:PORT=8080; node server.js`
+in PowerShell — still binds port 3000. That is a surprise worth knowing before
+you debug a port that never changes.
 [docs/getting-started/configuration.md](docs/getting-started/configuration.md)
 owns this topic and explains what adding environment support would require.
 
@@ -258,7 +285,7 @@ path-scoped nor method-scoped. Base URL: `http://127.0.0.1:3000`.
 
 | Aspect | Behaviour | Why |
 | --- | --- | --- |
-| Method | Any — `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `HEAD` | The listener never reads `req.method`. Source: `server.js:L6-L10` |
+| Method | Any that Node dispatches as a request — `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `HEAD`. `HEAD` gets the head with no body, and `CONNECT` never reaches the listener at all, both being runtime behaviours rather than decisions of this module | The listener never reads `req.method`. Source: `server.js:L6-L10` |
 | Path | Any, including `/` and arbitrary depth | The listener never reads `req.url` |
 | Query string | Ignored | Never read |
 | Request headers | Ignored | Never read |
@@ -280,9 +307,13 @@ The status and the header are set through the `res.statusCode` property and the
 `res.setHeader()` call; no combined status-and-headers helper is used anywhere in
 the file, so the head is flushed implicitly by `res.end()`.
 
-**There are no error responses.** The listener contains no conditional logic, so
-no `4xx` or `5xx` code path exists — not for an unknown path, not for an
-unsupported method, not for a malformed body.
+**The application defines no error responses.** The listener contains no
+conditional logic, so it has no `4xx` or `5xx` branch — not for an unknown path,
+not for an unsupported method, not for a malformed body. Node itself can still
+answer above the application: a request its HTTP parser rejects is met with a
+protocol-level error such as `400` or `431` that this module neither defines nor
+can suppress. The three layers that can produce an outcome are separated in
+[docs/api/http-api.md](docs/api/http-api.md).
 
 Two request kinds are answered differently by Node itself rather than by this
 application: a `HEAD` request receives the status line and headers with no body
@@ -299,14 +330,19 @@ sequenceDiagram
     participant C as HTTP client
     participant S as http.Server (server.js:L6)
     participant R as http.ServerResponse
-    C->>S: Request (ANY method, ANY path)
+    C->>S: Request dispatched through the request event (ANY method, ANY path)
     Note over S: req is never inspected
     S->>R: statusCode = 200 (L7)
     S->>R: setHeader Content-Type text/plain (L8)
     S->>R: end 'Hello, World!\n' (L9)
     R-->>C: 200 OK, 14 bytes
-%% Verified: GET /, GET /api/anything and POST /whatever all produce
-%% this exact exchange.
+%% This sequence applies only to requests Node dispatches through the request
+%% event, and every such request produces this exact exchange whatever its
+%% method and path. Requests Node does not dispatch through that event do not
+%% follow it at all: CONNECT goes to the connect event and is answered with
+%% nothing, and an unsupported Expect header is answered 417 by Node itself.
+%% A HEAD request does run the listener, but Node suppresses the body, so the
+%% client receives the head only.
 ```
 
 ### Worked examples
@@ -316,16 +352,22 @@ demonstrate that neither the path nor the method affects the answer. Each
 transcript below was captured from a real run; only the `Date` header differs
 between runs, because its value advances with the clock.
 
+Every probe carries `--noproxy '*'`, which is load-bearing rather than
+decorative: without it a configured `http_proxy` intercepts the request, and the
+proxy's reply is indistinguishable here from the service's own, so the check
+would confirm nothing. `--max-time 5` bounds each probe, and
+`--silent --show-error` drops the progress meter while keeping any diagnostic.
+
 Request the root path:
 
 ```bash
-curl -i http://127.0.0.1:3000/
+curl --noproxy '*' --include --silent --show-error --max-time 5 http://127.0.0.1:3000/
 ```
 
 ```http
 HTTP/1.1 200 OK
 Content-Type: text/plain
-Date: Tue, 04 Aug 2026 14:50:38 GMT
+Date: Tue, 04 Aug 2026 21:43:47 GMT
 Connection: keep-alive
 Keep-Alive: timeout=5
 Content-Length: 14
@@ -337,13 +379,13 @@ Request a path that looks like an API route. No such route is defined, and the
 answer is unchanged:
 
 ```bash
-curl -i http://127.0.0.1:3000/api/anything
+curl --noproxy '*' --include --silent --show-error --max-time 5 http://127.0.0.1:3000/api/anything
 ```
 
 ```http
 HTTP/1.1 200 OK
 Content-Type: text/plain
-Date: Tue, 04 Aug 2026 14:50:38 GMT
+Date: Tue, 04 Aug 2026 21:43:47 GMT
 Connection: keep-alive
 Keep-Alive: timeout=5
 Content-Length: 14
@@ -355,13 +397,13 @@ Send a `POST` instead of a `GET`. Again unchanged, which is what proves there is
 no method discrimination and therefore no `405` path:
 
 ```bash
-curl -i -X POST http://127.0.0.1:3000/whatever
+curl --noproxy '*' --include --silent --show-error --max-time 5 --request POST http://127.0.0.1:3000/whatever
 ```
 
 ```http
 HTTP/1.1 200 OK
 Content-Type: text/plain
-Date: Tue, 04 Aug 2026 14:50:38 GMT
+Date: Tue, 04 Aug 2026 21:43:47 GMT
 Connection: keep-alive
 Keep-Alive: timeout=5
 Content-Length: 14
@@ -417,38 +459,70 @@ listener is bound to `127.0.0.1` at `server.js:L3`, which is the loopback
 interface, so a request from another host does not arrive at all — it is refused
 at the transport layer, with no log line and no response to explain it.
 
-Verified from the host running the service, using the machine's own
-non-loopback address:
+See it for yourself from the host running the service. Derive that host's own
+non-loopback address rather than copying an address out of this page — probing
+somebody else's address tells you nothing about your bind — and bypass any
+configured proxy, or you get the proxy's verdict instead of your service's:
 
 ```bash
-curl -i -m 5 http://10.76.7.8:3000/
+HOSTIP="$(hostname -I | awk '{print $1}')"
+case "$HOSTIP" in
+  *[!0-9.]* | 127.*) HOSTIP='' ;;
+  [0-9]*.[0-9]*.[0-9]*.[0-9]*) ;;
+  *) HOSTIP='' ;;
+esac
+curl --noproxy '*' --include --silent --show-error --max-time 5 "http://${HOSTIP:?no usable non-loopback IPv4 address}:3000/"
 ```
 
-Captured output:
+The `case` rejects an empty derivation, a loopback address and anything that is
+not four dot-separated numeric groups, and `${HOSTIP:?…}` then fails the
+expansion so `curl` never runs on a value that failed validation — a warning
+alone would let the probe report a connection failure that says nothing about
+the bind. Captured output, with the address **redacted** — the value `curl`
+printed is the authoring host's own private address, which is
+environment-specific, so `<HOSTIP>` stands in for it. Nothing else in the line
+was edited, and `curl` exited 7:
 
 ```text
-curl: (7) Failed to connect to 10.76.7.8 port 3000 after 0 ms: Could not connect to server
+curl: (7) Failed to connect to <HOSTIP> port 3000 after 0 ms: Could not connect to server
+curl exit code: 7
 ```
+
+`hostname -I` is Linux-specific, and
+[docs/guides/deployment.md](docs/guides/deployment.md) gives the macOS,
+PowerShell, and Node-only equivalents alongside the reason each flag is there.
+
+From a genuinely remote client the same cause can surface as a timeout or a
+silent drop rather than an immediate refusal, depending on what sits in between;
+[docs/guides/deployment.md](docs/guides/deployment.md) owns that detail.
 
 The same request to `http://127.0.0.1:3000/` succeeds, as shown in
 [API documentation](#api-documentation). There are two ways to change that, and
 they are not equally good:
 
-1. **Front the service with a reverse proxy — recommended.** Run the proxy on
-   the externally reachable interface and have it forward to
-   `127.0.0.1:3000`. The service keeps its loopback binding, so nothing but the
-   proxy can reach it, and the proxy is where TLS termination, access control,
-   and rate limiting belong.
+1. **Front the service with a reverse proxy — preferred.** Run the proxy on the
+   externally reachable interface and have it forward to `127.0.0.1:3000`. The
+   service keeps its loopback binding, so no **other host** can reach it except
+   through the proxy — but that is a remote-access control and nothing more.
+   Every local user and process can still connect straight to `127.0.0.1:3000`,
+   bypassing the proxy's TLS, authentication, rate limits and access log
+   entirely. A proxy also supplies none of those controls until you explicitly
+   configure them, and this repository ships no proxy configuration.
 2. **Change the bind address.** Editing `hostname` at `server.js:L3` to
    `0.0.0.0` exposes the listener on every interface. That removes the only
-   access control this service has, so do it only on a network you fully
-   control.
+   access control this service has, so restrict reachability with a firewall or
+   ACL, terminate TLS, require authentication, and log requests outside the
+   service first. [docs/guides/deployment.md](docs/guides/deployment.md) lists
+   what has to be in place before the bind changes.
 
-Beyond reachability, three operational realities apply:
+Beyond reachability, four operational realities apply:
 
 - **Process supervision is external.** The process does not daemonise and does
   not restart itself. Use whatever supervisor your platform provides so a crash
   or a reboot does not leave the service down.
+- **Run it as an unprivileged user.** Port 3000 needs no elevated privilege and
+  the process reads no protected path, so a dedicated ordinary account is
+  sufficient — never `root`.
 - **There is no graceful shutdown.** No signal handler is installed, so
   termination is immediate and in-flight requests are dropped.
 - **A port conflict is fatal at startup.** See
@@ -468,10 +542,12 @@ the deployment-topology diagram, is in
 | `Error: listen EADDRINUSE: address already in use 127.0.0.1:3000` on startup | Another process already holds port 3000 | Stop that process, or change `port` at `server.js:L4` and restart |
 | The service answers on `127.0.0.1` but not from another machine | The loopback binding at `server.js:L3` | Front it with a reverse proxy, or change the bind address. See [Deployment guide](#deployment-guide) |
 | `npm test` fails with `Error: no test specified` | Intended. `scripts.test` is still the npm-init placeholder, and this project has no test suite | Nothing. The non-zero exit is expected and is not a broken environment |
-| `npm start` reports a missing script | You are on a checkout from before the `start` script was added | Run `node server.js` directly, or update your checkout |
-| A syntax error on startup | Your Node.js is older than the `>=18` floor | Upgrade Node.js. See [Prerequisites](#prerequisites) |
+| `npm start` fails with `Missing script: "start"` | Not an old checkout: this manifest declares the script, and npm falls back to `node server.js` regardless whenever the package root holds one. You are either not in the repository root, or the root `server.js` is missing | `cd` to the directory holding `server.js` and `package.json`, or restore that file |
+| A `SyntaxError` at startup | `server.js` does not parse, because it was edited or truncated. It is not evidence of an old Node.js — the source uses nothing newer than the `>=18` floor | Run `node --check server.js`, then restore the file from version control |
+| No error at all, but `node --version` reports 18 or 20 | Both satisfy `engines.node` and both are end-of-life, so the runtime receives no security patches and nothing warns you | Move to a maintained LTS line — see [Prerequisites](#prerequisites) and [docs/guides/troubleshooting.md](docs/guides/troubleshooting.md) |
 
-The port-conflict failure, captured in full:
+The port-conflict failure, captured by starting a second instance while the
+first held the port:
 
 ```text
 node:events:497
@@ -482,13 +558,34 @@ Error: listen EADDRINUSE: address already in use 127.0.0.1:3000
     at Server.setupListenHandle [as _listen2] (node:net:1941:16)
     at listenInCluster (node:net:1998:12)
     at node:net:2207:7
+    at process.processTicksAndRejections (node:internal/process/task_queues:89:21)
+Emitted 'error' event on Server instance at:
+    at emitErrorNT (node:net:1977:8)
+    at process.processTicksAndRejections (node:internal/process/task_queues:89:21) {
+  code: 'EADDRINUSE',
+  errno: -98,
+  syscall: 'listen',
+  address: '127.0.0.1',
+  port: 3000
+}
+
+Node.js v22.23.2
 ```
 
-To find out whether the port is already taken, use your platform's tooling —
-`lsof -i :3000` on Linux and macOS, or `netstat -ano | findstr :3000` on
-Windows — and then stop the owning process with `kill $(lsof -t -i:3000)` or
-`taskkill /PID <pid> /F` respectively. Where neither tool is installed, this
-check needs nothing but Node:
+To find the process holding the port, ask specifically for the **listening**
+socket, because a query that is not restricted that way also matches
+established connections and can name unrelated client processes:
+`lsof -nP -iTCP:3000 -sTCP:LISTEN` on Linux and macOS, or
+`netstat -ano | findstr "LISTENING" | findstr ":3000"` on Windows. Inspect the
+PID it reports — `ps -p <pid> -o pid,user,args`, or `tasklist /FI "PID eq <pid>"`
+— and stop it only once you have confirmed that it is yours and that it is the
+listener. Ask for a clean exit first with `kill <pid>` or `taskkill /PID <pid>`,
+and escalate to `kill -9 <pid>` or `taskkill /PID <pid> /F` only if the process
+survives. Never expand a discovery command straight into `kill`: the safe,
+step-by-step procedure, including how to handle zero or several matching PIDs,
+is in
+[docs/guides/troubleshooting.md](docs/guides/troubleshooting.md). Where none of
+those tools is installed, this check needs nothing but Node:
 
 ```bash
 node -e "const s=require('net').connect(3000,'127.0.0.1');s.on('connect',()=>{console.log('port 3000 on 127.0.0.1 is in use');s.end();});s.on('error',()=>console.log('port 3000 on 127.0.0.1 is free'));"
@@ -573,8 +670,11 @@ their absence rather than promising them.
 - **No graceful shutdown.** No signal handler, no connection draining.
 - **No structured logging.** One banner line at startup; requests are not
   logged.
-- **No health-check endpoint.** The catch-all response is the only signal.
-- **No error-handling middleware.** No `4xx` or `5xx` code path exists.
+- **No health-check endpoint.** No `/health` or `/ready` route exists. An HTTP
+  `GET` is one basic liveness option; a process check and a TCP connect are the
+  others.
+- **No error-handling middleware.** The listener defines no `4xx` or `5xx`
+  branch, though Node can still emit protocol-level errors above it.
 - **No environment-variable configuration.** `process.env` is never read.
 - **No test suite.** `npm test` is the npm-init placeholder and exits non-zero
   on purpose.

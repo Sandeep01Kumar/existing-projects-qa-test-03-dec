@@ -15,14 +15,19 @@ sequenceDiagram
     participant C as HTTP client
     participant S as http.Server (server.js:L6)
     participant R as http.ServerResponse
-    C->>S: Request (ANY method, ANY path)
+    C->>S: Request dispatched through the request event (ANY method, ANY path)
     Note over S: req is never inspected
     S->>R: statusCode = 200 (L7)
     S->>R: setHeader Content-Type text/plain (L8)
     S->>R: end 'Hello, World!\n' (L9)
     R-->>C: 200 OK, 14 bytes
-%% Verified: GET /, GET /api/anything and POST /whatever all produce
-%% this exact exchange.
+%% This sequence applies only to requests Node dispatches through the request
+%% event, and every such request produces this exact exchange whatever its
+%% method and path. Requests Node does not dispatch through that event do not
+%% follow it at all: CONNECT goes to the connect event and is answered with
+%% nothing, and an unsupported Expect header is answered 417 by Node itself.
+%% A HEAD request does run the listener, but Node suppresses the body, so the
+%% client receives the head only.
 ```
 
 ## Step 0: before the listener runs

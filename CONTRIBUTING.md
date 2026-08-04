@@ -92,19 +92,38 @@ same directory:
 npm run docs:md
 ```
 
-Three properties of these commands are worth knowing:
+Three properties of these commands are worth knowing, and the first is the one
+that surprises people:
 
-- **They are self-contained.** Both run entirely from the packages `npm ci`
-  installs, and neither reaches the network. `docs:md` uses the pinned `jsdoc`
-  package through `tools/render-module-markdown.js` rather than fetching a second
-  generator at run time.
+- **They differ in what they need, and in what they trust.** `docs:api` runs
+  entirely from the packages `npm install` (or `npm ci`) resolves, because
+  `jsdoc` is a declared devDependency pinned and integrity-checked by
+  `package-lock.json`. `docs:md` instead fetches its generator on demand —
+  `npx --yes --ignore-scripts jsdoc-to-markdown@9.1.3` — so it needs network
+  access the first time it runs on a machine, and the version pin covers only
+  the top-level package: the transitive closure is resolved fresh and is not
+  locked, so successive runs can execute different third-party code. Run it
+  manually when you want a fresh rendering, in a disposable environment and
+  under an unprivileged account; never wire it into a gate. `--ignore-scripts`
+  keeps the fetched packages' lifecycle scripts from running, and
+  [docs/api/server-module.md](docs/api/server-module.md) documents the
+  trade-off in full, including how to lock the generator outside this
+  repository. Keeping it on demand is deliberate: `jsdoc-to-markdown` is
+  optional to this project, so it stays out of `devDependencies` and out of the
+  lockfile, and the three declared devDependencies remain the whole of the
+  required toolchain.
 - **The output directory is disposable.** `docs/api/generated/` is git-ignored
   build output. Neither command prunes stale files from a previous run, so delete
   the directory when you want a guaranteed-clean rebuild:
   `rm -rf docs/api/generated`.
-- **A failed render changes nothing.** `docs:md` writes to a temporary file and
-  moves it into place only on success, so a failure leaves the previous rendering
-  intact rather than replacing it with an empty file.
+- **A failed `docs:md` leaves a truncated file behind.** The script redirects the
+  generator's standard output into
+  `docs/api/generated/server-module.md`, and the shell creates that file before
+  the generator runs. A run that fails part way therefore leaves a short or empty
+  file rather than the previous rendering, so check the exit status rather than
+  the file's existence. Delete the directory and re-run once the cause is
+  fixed; the file is disposable build output, and the committed reference that
+  readers use is [docs/api/server-module.md](docs/api/server-module.md).
 
 Never author a link into `docs/api/generated/`. It is not committed, so such a
 link is broken for every reader who has not run the generator.
@@ -149,7 +168,7 @@ flowchart TD
     SRC["server.js<br/>JSDoc blocks + inline comments"]
     CFG["jsdoc.json<br/>allowUnknownTags: false"]
     API["npm run docs:api<br/>HTML reference"]
-    MD["npm run docs:md<br/>tools/render-module-markdown.js"]
+    MD["npm run docs:md - optional, manual<br/>npx fetch, --ignore-scripts<br/>top-level pin only, closure unlocked"]
     GEN["docs/api/generated/<br/>git-ignored build output"]
     PAGES["README.md, CONTRIBUTING.md<br/>and the 11 docs/ pages"]
     LINT["npm run docs:lint<br/>.markdownlint-cli2.jsonc"]
@@ -158,7 +177,7 @@ flowchart TD
     PRE["npm run docs:preflight<br/>devEngines.runtime floor"]
     SRC --> CFG
     CFG --> API
-    CFG --> MD
+    SRC --> MD
     API --> GEN
     MD --> GEN
     PAGES --> LINT
@@ -202,13 +221,13 @@ Server running at http://127.0.0.1:3000/
 ```
 
 ```bash
-curl -i http://127.0.0.1:3000/
+curl --noproxy '*' --include --silent --show-error --max-time 5 http://127.0.0.1:3000/
 ```
 
 ```http
 HTTP/1.1 200 OK
 Content-Type: text/plain
-Date: Tue, 04 Aug 2026 14:50:38 GMT
+Date: Tue, 04 Aug 2026 21:58:20 GMT
 Connection: keep-alive
 Keep-Alive: timeout=5
 Content-Length: 14

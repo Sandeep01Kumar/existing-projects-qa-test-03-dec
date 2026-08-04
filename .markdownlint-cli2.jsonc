@@ -11,16 +11,18 @@
 //   conventions. No file count or file list is recorded anywhere in here on
 //   purpose: both would go stale the first time a page is added or removed.
 //
-//   This repository ships no style guide to inherit: there is no .editorconfig,
-//   no .prettierrc, no .eslintrc* and no style document of any kind. The
-//   conventions below are therefore ESTABLISHED here, and this file is what
-//   makes them enforceable.
+//   No style guide was available to inherit when these conventions were
+//   established: the repository carried no .editorconfig, no .prettierrc, no
+//   .eslintrc* and no style document of any kind. The conventions below were
+//   therefore ESTABLISHED here, and this file is what makes them enforceable.
+//   CONTRIBUTING.md now states the same conventions in prose for authors; this
+//   file is the machine-checkable half of that pair, so the two must agree --
+//   change both together or the gate and the guide will disagree.
 //
 //   Provenance of every setting: the documentation plan's stated conventions
 //   (ATX headings, one H1 per document, no skipped heading levels, an explicit
-//   language hint on every fenced block) and the repository's own observable
-//   state (its single existing heading is ATX). Each setting's comment names
-//   which of those it comes from, so nothing here rests on an assumption.
+//   language hint on every fenced block). Each setting's comment names what it
+//   comes from, so nothing here rests on an assumption.
 //
 // HOW IT IS RUN
 //   npm run docs:lint    -> markdownlint-cli2 with NO glob arguments, so the
@@ -75,9 +77,11 @@
 //   loud rather than a silently passing no-op -- but it lints nothing, and the
 //   filename still matters as much as the contents.
 //
-//   A run that does load this file echoes the resolved set, for example
-//   "Finding: **/*.md !node_modules/** !docs/api/generated/**" -- which is the
-//   quickest way to confirm it was actually read.
+//   A run that does load this file echoes the resolved set on a "Finding:" line.
+//   With the arrays below, that echo reads
+//   "Finding: **/*.md !**/node_modules/** !docs/api/generated/**" -- which is
+//   the quickest way to confirm this file was actually read. The echo mirrors
+//   the arrays verbatim, so it changes whenever they do.
 //
 // EDITING POLICY
 //   Every rule switched off here is a convention the corpus stops being held
@@ -117,11 +121,13 @@
         // the generated table of contents.
         "MD001": true,
 
-        // MD003/heading-style -- ATX headings ("# Heading"), never setext.
-        // Matches the one heading precedent the repository already has:
-        // "# hao-backprop-test" (README.md:L1). Default is "consistent", which
-        // would accept a setext document as long as it were uniform; "atx"
-        // fixes the style across every file instead.
+        // MD003/heading-style -- ATX headings ("# Heading"), never setext. ATX
+        // is the style every heading in the corpus is written in and the style
+        // CONTRIBUTING.md states in prose, and it is the only one of the two
+        // that expresses every level unambiguously: setext cannot mark a level
+        // below h2 at all. Default is "consistent", which would accept a setext
+        // document as long as it were uniform; "atx" fixes the style across
+        // every file instead.
         "MD003": {
             "style": "atx"
         },
@@ -196,9 +202,11 @@
         //   http       request/response exchanges
         //   javascript server.js excerpts and JSDoc examples
         //   json       package.json / jsdoc.json excerpts
-        //   mermaid    all eight diagrams (DG1-DG8); the hint is exactly what
-        //              makes GitHub render them natively, so it must never be
-        //              stripped to satisfy a linter
+        //   mermaid    the architecture, flow and lifecycle diagrams, which are
+        //              authored as Mermaid text rather than as images; the hint
+        //              is exactly what makes a hosting platform render them
+        //              natively, so it must never be stripped to satisfy a
+        //              linter
         //   text       directory trees and plain terminal transcripts
         "MD040": {
             "allowed_languages": [

@@ -52,7 +52,7 @@ correction landing in a single place.
 | The two configuration constants | [getting-started/configuration.md](getting-started/configuration.md) |
 | The HTTP response contract | [api/http-api.md](api/http-api.md) |
 | The seven documented symbols | [api/server-module.md](api/server-module.md) |
-| The loopback-binding constraint | [guides/deployment.md](guides/deployment.md) |
+| The loopback binding, and the constraint it creates | [guides/deployment.md](guides/deployment.md) |
 | Fixture provenance | [repository-assets.md](repository-assets.md) |
 | Component model diagram | [architecture/overview.md](architecture/overview.md) |
 | Request lifecycle diagram | [api/http-api.md](api/http-api.md) |
@@ -90,6 +90,22 @@ and **no page in this corpus ever links into it**, because such a link would be
 broken for any reader who has not run the generator. The authored, committed
 reference is [api/server-module.md](api/server-module.md), which is readable
 with no build step at all.
+
+Neither command works on a bare checkout without one prerequisite each, and they
+differ in which: `docs:api` needs `npm install` (or `npm ci`) to have installed
+the declared `jsdoc` devDependency, while `docs:md` fetches its generator over
+the network with `npx --yes --ignore-scripts jsdoc-to-markdown@9.1.3`.
+
+That fetch is why `docs:md` is optional and manual. Its version pin covers the
+top-level package only — the transitive closure is resolved fresh and is not
+locked to integrity hashes — so it downloads and runs third-party code that can
+differ between runs. Use it in a disposable environment under an unprivileged
+account, never in an automated gate, and read
+[api/server-module.md](api/server-module.md) for the full trade-off and for how
+to lock the generator outside this repository.
+[getting-started/installation.md](getting-started/installation.md) owns the
+install step and [../CONTRIBUTING.md](../CONTRIBUTING.md) documents both
+commands in full.
 
 ## See also
 
