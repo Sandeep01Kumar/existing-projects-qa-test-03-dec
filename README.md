@@ -1,2 +1,587 @@
 # hao-backprop-test
-test project for backprop integration. Do not touch!
+
+A minimal, single-module Node.js HTTP service that answers every ordinary
+request with the same plain-text greeting. The whole application is
+`server.js`: 14 content lines, no framework, no router, and no runtime
+dependencies.
+
+## Project identity
+
+This repository is known by two different names, and both are deliberately left
+in place.
+
+| Where | Declared name | Source |
+| --- | --- | --- |
+| This README's title | `hao-backprop-test` | `README.md:L1` in the original two-line file |
+| npm manifest | `hello_world` | `package.json` field `name` |
+| npm lockfile | `hello_world` | `package-lock.json:L2` |
+
+The mismatch is **documented rather than resolved**. Renaming an npm package
+identity is a functional change, the name is mirrored in the lockfile, and the
+discrepancy may well be intentional, so this documentation pass records it and
+leaves both values untouched. **If you own this repository, please confirm which
+name is authoritative** so a later change can reconcile them deliberately.
+
+One further change to this file is worth calling out: the original second line
+read `test project for backprop integration. Do not touch!`. That instruction is
+superseded by the documentation work this README is part of. The tension is
+narrower than it looks — every edit made to `server.js` is a comment, so the
+service's behaviour is preserved byte for byte and remains exactly as
+deterministic as before.
+
+## Table of contents
+
+- [Project identity](#project-identity)
+- [Overview](#overview)
+- [Architecture at a glance](#architecture-at-a-glance)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Running the server](#running-the-server)
+- [API documentation](#api-documentation)
+- [Code walkthrough](#code-walkthrough)
+- [Deployment guide](#deployment-guide)
+- [Troubleshooting](#troubleshooting)
+- [Project structure and repository assets](#project-structure-and-repository-assets)
+- [Known limitations and non-goals](#known-limitations-and-non-goals)
+- [License](#license)
+
+## Overview
+
+`server.js` creates one HTTP server, binds it to the IPv4 loopback address on
+port 3000, and replies to every request it receives with `Hello, World!` as
+`text/plain`. That is the entire feature set, and the following properties are
+worth knowing before you read a single line of it.
+
+- **Zero runtime dependencies.** The only import is Node's built-in `http`
+  module. Source: `server.js:L1`.
+- **No build step.** There is nothing to compile, bundle, or transpile; the file
+  runs as written.
+- **One catch-all endpoint.** The request listener never inspects the request
+  object, so method, path, query string, headers, and body are all ignored.
+  Source: `server.js:L6-L10`.
+- **Reachable only from the local machine.** The listener is bound to
+  `127.0.0.1`, so no other host can connect to it. Source: `server.js:L3`.
+- **The module exports nothing.** There is no `module.exports` anywhere in the
+  file. Its entire observable contract is a side effect performed at import
+  time: requiring the file binds a listening socket. A reader who assumes the
+  module is inert on import will bind a port by accident.
+- **Both functions in it are anonymous arrow expressions.** Source:
+  `server.js:L6` and `server.js:L12`. That is why the JSDoc layer names them
+  through `@callback` typedefs rather than through ordinary doc blocks.
+- **It is a test fixture, not a production service.** There is no TLS, no
+  authentication, no routing, and no graceful shutdown. See
+  [Known limitations and non-goals](#known-limitations-and-non-goals).
+
+## Architecture at a glance
+
+The following diagram is mirrored from `docs/architecture/overview.md`, which
+owns it. Edit both copies together.
+
+```mermaid
+flowchart LR
+    C["HTTP client<br/>curl, browser, script"]
+    subgraph HOST["Local machine only"]
+        subgraph PROC["Single Node.js process: node server.js"]
+            L["http.Server bound to 127.0.0.1:3000<br/>server.js:L6, L12"]
+            H["Request listener<br/>server.js:L6-L10"]
+            L --> H
+        end
+    end
+    C -->|"any method, any path"| L
+    H -->|"200 text/plain Hello, World!"| C
+%% One process, one listener, one client. No database, cache, queue,
+%% load balancer or second service exists in this system.
+```
+
+The design is a single process with a single responsibility. Node's event loop
+accepts connections and dispatches each request to one listener function; there
+is no worker pool, no cluster, and no shared state, so nothing has to be
+synchronised. Every response is composed from constants in the source, which is
+what makes the service stateless: two requests that arrive a week apart get the
+same answer, and restarting the process loses nothing.
+
+The startup path is equally short. Requiring `http`, reading two configuration
+constants, constructing the server, and binding the socket all happen in one
+pass through the file, after which the process sits idle in the event loop
+waiting for connections. Everything that happens afterwards is driven by
+events — a connection arriving, a request being parsed, a response being
+flushed. For the diagrams that break those two paths down step by step, see
+[docs/architecture/overview.md](docs/architecture/overview.md) and
+[docs/architecture/request-lifecycle.md](docs/architecture/request-lifecycle.md).
+
+## Prerequisites
+
+Node.js is the only prerequisite. The manifest declares the supported floor in
+its `engines.node` field:
+
+| Requirement | Value | Why |
+| --- | --- | --- |
+| Node.js floor | `>=18` | Covers the core `http` API surface this module uses, and is declared in `package.json` as `engines.node` |
+| Node.js verified | `v22.23.2` | The version this documentation was written and verified against |
+| npm verified | `11.18.0` | Used for the install and script runs quoted throughout |
+
+The floor is the contract; the verified versions are an observation. Check your
+toolchain:
+
+```bash
+node --version
+npm --version
+```
+
+Captured output:
+
+```text
+v22.23.2
+11.18.0
+```
+
+`docs/getting-started/installation.md` owns the runtime baseline in full,
+including what to do when your Node.js version is older than the floor. See
+[docs/getting-started/installation.md](docs/getting-started/installation.md).
+
+## Installation
+
+Clone the repository and enter it. The clone URL depends on where you are
+reading this from, so substitute your own remote:
+
+```bash
+git clone <repository-url>
+cd hao-backprop-test
+```
+
+Then install:
+
+```bash
+npm install
+```
+
+Captured output:
+
+```text
+added 178 packages, and audited 179 packages in 1s
+
+77 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities
+```
+
+**Everything that command installed is documentation tooling, not runtime code.**
+The manifest declares no `dependencies` at all — only three
+`devDependencies` (`jsdoc`, `markdownlint-cli2`, and `markdown-link-check`) that
+build and check this documentation. The service itself needs none of them, which
+you can confirm without uninstalling anything:
+
+```bash
+npm ls --omit=dev --depth=0
+```
+
+Captured output:
+
+```text
+hello_world@1.0.0 /path/to/hao-backprop-test
+└── (empty)
+```
+
+The practical consequence: `node server.js` runs correctly on a freshly cloned
+repository with no `node_modules` directory present. Install only if you intend
+to build or lint the documentation.
+
+## Configuration
+
+Configuration consists of two constants in the source. There is no
+configuration file, no `.env`, and no environment variable of any kind is read.
+
+| Option | Value | Source | Effect |
+| --- | --- | --- | --- |
+| `hostname` | `127.0.0.1` | `server.js:L3` | IPv4 loopback. Confines reachability to the local machine |
+| `port` | `3000` | `server.js:L4` | TCP port the listener binds |
+
+To change either one, edit the constant and restart the process:
+
+```bash
+node server.js
+```
+
+There is no reload mechanism, so a running process keeps its old values until it
+is stopped and started again. The absence of environment-variable support is
+deliberate rather than accidental: the module reads `process.env` nowhere, so
+`PORT=8080 node server.js` has no effect whatsoever — a surprise worth knowing
+before you debug a port that never changes.
+[docs/getting-started/configuration.md](docs/getting-started/configuration.md)
+owns this topic and explains what adding environment support would require.
+
+## Running the server
+
+Run the file directly:
+
+```bash
+node server.js
+```
+
+Captured output, exactly one line:
+
+```text
+Server running at http://127.0.0.1:3000/
+```
+
+Or use the npm script, which runs the same command:
+
+```bash
+npm start
+```
+
+Captured output:
+
+```text
+> hello_world@1.0.0 start
+> node server.js
+
+Server running at http://127.0.0.1:3000/
+```
+
+The banner is printed by the startup callback once the socket is bound, and its
+text is interpolated from the two configuration constants. Source:
+`server.js:L12-L14`.
+
+Stop the server with `Ctrl+C` in the terminal running it. That is an immediate
+termination: the module installs **no** signal handler and performs **no**
+graceful shutdown, so in-flight requests are not drained and no cleanup runs.
+
+## API documentation
+
+The service exposes exactly one logical endpoint, and it is neither
+path-scoped nor method-scoped. Base URL: `http://127.0.0.1:3000`.
+
+### Request matching
+
+| Aspect | Behaviour | Why |
+| --- | --- | --- |
+| Method | Any — `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `HEAD` | The listener never reads `req.method`. Source: `server.js:L6-L10` |
+| Path | Any, including `/` and arbitrary depth | The listener never reads `req.url` |
+| Query string | Ignored | Never read |
+| Request headers | Ignored | Never read |
+| Request body | Ignored, and never consumed | The request stream is not read |
+
+### Response specification
+
+| Field | Value | Source |
+| --- | --- | --- |
+| Status | `200` | `res.statusCode = 200` at `server.js:L7` |
+| `Content-Type` | `text/plain` | `res.setHeader(...)` at `server.js:L8` |
+| `Content-Length` | `14` | Framed by Node from the 14-byte body |
+| `Connection` | `keep-alive` for an HTTP/1.1 request that permits reuse | Node's default framing |
+| `Keep-Alive` | `timeout=5` | Node's default framing |
+| `Date` | Current time, regenerated per response | Node sends it by default |
+| Body | `Hello, World!` followed by a newline | `res.end('Hello, World!\n')` at `server.js:L9` |
+
+The status and the header are set through the `res.statusCode` property and the
+`res.setHeader()` call; no combined status-and-headers helper is used anywhere in
+the file, so the head is flushed implicitly by `res.end()`.
+
+**There are no error responses.** The listener contains no conditional logic, so
+no `4xx` or `5xx` code path exists — not for an unknown path, not for an
+unsupported method, not for a malformed body.
+
+Two request kinds are answered differently by Node itself rather than by this
+application: a `HEAD` request receives the status line and headers with no body
+and no `Content-Length`, and a `CONNECT` request never reaches the listener at
+all because Node routes it to a separate event this file does not handle.
+
+### Request lifecycle diagram
+
+The following diagram is mirrored from `docs/api/http-api.md`, which owns it.
+Edit both copies together.
+
+```mermaid
+sequenceDiagram
+    participant C as HTTP client
+    participant S as http.Server (server.js:L6)
+    participant R as http.ServerResponse
+    C->>S: Request (ANY method, ANY path)
+    Note over S: req is never inspected
+    S->>R: statusCode = 200 (L7)
+    S->>R: setHeader Content-Type text/plain (L8)
+    S->>R: end 'Hello, World!\n' (L9)
+    R-->>C: 200 OK, 14 bytes
+%% Verified: GET /, GET /api/anything and POST /whatever all produce
+%% this exact exchange.
+```
+
+### Worked examples
+
+Three examples are given rather than one, because it takes all three to
+demonstrate that neither the path nor the method affects the answer. Each
+transcript below was captured from a real run; only the `Date` header differs
+between runs, because its value advances with the clock.
+
+Request the root path:
+
+```bash
+curl -i http://127.0.0.1:3000/
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: text/plain
+Date: Tue, 04 Aug 2026 14:50:38 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+Content-Length: 14
+
+Hello, World!
+```
+
+Request a path that looks like an API route. No such route is defined, and the
+answer is unchanged:
+
+```bash
+curl -i http://127.0.0.1:3000/api/anything
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: text/plain
+Date: Tue, 04 Aug 2026 14:50:38 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+Content-Length: 14
+
+Hello, World!
+```
+
+Send a `POST` instead of a `GET`. Again unchanged, which is what proves there is
+no method discrimination and therefore no `405` path:
+
+```bash
+curl -i -X POST http://127.0.0.1:3000/whatever
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: text/plain
+Date: Tue, 04 Aug 2026 14:50:38 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+Content-Length: 14
+
+Hello, World!
+```
+
+The full HTTP contract lives in
+[docs/api/http-api.md](docs/api/http-api.md), and the code-level reference for
+the module's seven documented symbols lives in
+[docs/api/server-module.md](docs/api/server-module.md).
+
+## Code walkthrough
+
+`server.js` is 14 content lines: 11 lines of code and 3 blank separators at L2,
+L5, and L11. The line numbers used here — and everywhere else in this
+documentation — refer to that original 14-line layout, which is the citation
+basis the whole corpus shares. The JSDoc blocks and inline comments now in the
+file shift the physical line numbers without changing that basis.
+
+| Line | Code | What it does |
+| --- | --- | --- |
+| L1 | `const http = require('http');` | Loads Node's built-in HTTP module. It is a core module, so nothing is installed to satisfy this import |
+| L2 | *(blank)* | Separates dependency acquisition from configuration |
+| L3 | `const hostname = '127.0.0.1';` | The IPv4 loopback literal. This single value is what confines the service to the local machine |
+| L4 | `const port = 3000;` | The TCP port the listener will bind |
+| L5 | *(blank)* | Separates configuration from server construction |
+| L6 | `const server = http.createServer((req, res) => {` | Instantiates an `http.Server` and registers the request listener that runs once per request |
+| L7 | `res.statusCode = 200;` | Sets the status line. Must happen before any body byte is written |
+| L8 | `res.setHeader('Content-Type', 'text/plain');` | Declares the payload MIME type. Must precede `res.end()` |
+| L9 | `res.end('Hello, World!\n');` | Writes the 14-byte body and terminates the response, flushing the implicit head. For a `HEAD` request Node discards the body |
+| L10 | `});` | Closes the request-listener body and the `createServer` invocation |
+| L11 | *(blank)* | Separates server construction from socket binding |
+| L12 | `server.listen(port, hostname, () => {` | Binds the socket and begins accepting connections. Asynchronous: the callback fires on the `listening` event |
+| L13 | `console.log(...)` | Emits the readiness banner, interpolating `hostname` and `port` |
+| L14 | `});` | Closes the startup callback and the `listen` invocation |
+
+Two observations that the table cannot convey on its own. First, the request
+listener is where the catch-all behaviour comes from: it receives `req` and
+never touches it, so there is nothing in the code that could branch on a path or
+a method. Second, `server.listen()` is what makes requiring this file
+consequential — the socket is bound as a side effect of import, before any
+caller has a chance to intervene.
+
+The expanded reading, with a structural map from each line to the symbol that
+documents it, is in
+[docs/architecture/code-walkthrough.md](docs/architecture/code-walkthrough.md).
+
+## Deployment guide
+
+**Start with this: the service is unreachable from any other machine.** The
+listener is bound to `127.0.0.1` at `server.js:L3`, which is the loopback
+interface, so a request from another host does not arrive at all — it is refused
+at the transport layer, with no log line and no response to explain it.
+
+Verified from the host running the service, using the machine's own
+non-loopback address:
+
+```bash
+curl -i -m 5 http://10.76.7.8:3000/
+```
+
+Captured output:
+
+```text
+curl: (7) Failed to connect to 10.76.7.8 port 3000 after 0 ms: Could not connect to server
+```
+
+The same request to `http://127.0.0.1:3000/` succeeds, as shown in
+[API documentation](#api-documentation). There are two ways to change that, and
+they are not equally good:
+
+1. **Front the service with a reverse proxy — recommended.** Run the proxy on
+   the externally reachable interface and have it forward to
+   `127.0.0.1:3000`. The service keeps its loopback binding, so nothing but the
+   proxy can reach it, and the proxy is where TLS termination, access control,
+   and rate limiting belong.
+2. **Change the bind address.** Editing `hostname` at `server.js:L3` to
+   `0.0.0.0` exposes the listener on every interface. That removes the only
+   access control this service has, so do it only on a network you fully
+   control.
+
+Beyond reachability, three operational realities apply:
+
+- **Process supervision is external.** The process does not daemonise and does
+  not restart itself. Use whatever supervisor your platform provides so a crash
+  or a reboot does not leave the service down.
+- **There is no graceful shutdown.** No signal handler is installed, so
+  termination is immediate and in-flight requests are dropped.
+- **A port conflict is fatal at startup.** See
+  [Troubleshooting](#troubleshooting) for the exact error and how to clear it.
+
+**This service is not production-ready, and it is not intended to be.** It is a
+test fixture. It has no TLS, no authentication, no authorisation, no rate
+limiting, no routing, no request logging, no health endpoint, and no error
+handling. Do not place it on an untrusted network. The full runbook, including
+the deployment-topology diagram, is in
+[docs/guides/deployment.md](docs/guides/deployment.md).
+
+## Troubleshooting
+
+| Symptom | Cause | What to do |
+| --- | --- | --- |
+| `Error: listen EADDRINUSE: address already in use 127.0.0.1:3000` on startup | Another process already holds port 3000 | Stop that process, or change `port` at `server.js:L4` and restart |
+| The service answers on `127.0.0.1` but not from another machine | The loopback binding at `server.js:L3` | Front it with a reverse proxy, or change the bind address. See [Deployment guide](#deployment-guide) |
+| `npm test` fails with `Error: no test specified` | Intended. `scripts.test` is still the npm-init placeholder, and this project has no test suite | Nothing. The non-zero exit is expected and is not a broken environment |
+| `npm start` reports a missing script | You are on a checkout from before the `start` script was added | Run `node server.js` directly, or update your checkout |
+| A syntax error on startup | Your Node.js is older than the `>=18` floor | Upgrade Node.js. See [Prerequisites](#prerequisites) |
+
+The port-conflict failure, captured in full:
+
+```text
+node:events:497
+      throw er; // Unhandled 'error' event
+      ^
+
+Error: listen EADDRINUSE: address already in use 127.0.0.1:3000
+    at Server.setupListenHandle [as _listen2] (node:net:1941:16)
+    at listenInCluster (node:net:1998:12)
+    at node:net:2207:7
+```
+
+To find out whether the port is already taken, use your platform's tooling —
+`lsof -i :3000` on Linux and macOS, or `netstat -ano | findstr :3000` on
+Windows — and then stop the owning process with `kill $(lsof -t -i:3000)` or
+`taskkill /PID <pid> /F` respectively. Where neither tool is installed, this
+check needs nothing but Node:
+
+```bash
+node -e "const s=require('net').connect(3000,'127.0.0.1');s.on('connect',()=>{console.log('port 3000 on 127.0.0.1 is in use');s.end();});s.on('error',()=>console.log('port 3000 on 127.0.0.1 is free'));"
+```
+
+Captured output while the service was running:
+
+```text
+port 3000 on 127.0.0.1 is in use
+```
+
+The full symptom-to-remedy matrix, with a decision tree, is in
+[docs/guides/troubleshooting.md](docs/guides/troubleshooting.md).
+
+## Project structure and repository assets
+
+The repository is a flat tree plus the documentation directory this pass added:
+
+```text
+.
+├── server.js                  The application: 14 content lines
+├── package.json               npm manifest, engines, and the doc scripts
+├── package-lock.json          Lockfile, lockfileVersion 3
+├── jsdoc.json                 JSDoc generator configuration
+├── .markdownlint-cli2.jsonc   Markdown lint rules
+├── .markdown-link-check.json  Hermetic link-check policy
+├── .gitignore                 Excludes node_modules/ and generated docs
+├── LICENSE                    MIT licence text
+├── CONTRIBUTING.md            Documentation authoring workflow
+├── README.md                  This file
+├── docs/                      Documentation corpus (11 pages)
+├── tools/                     Documentation gate scripts
+├── LoginTest.java             Fixture: intentionally non-compilable
+├── industry.csv               Fixture: 44 lines, 1 header + 43 labels
+├── test.txt.txt               Fixture: 0 bytes, intentionally empty
+├── sample.doc                 Fixture: 98 KB binary DOC
+├── demo.jpg                   Fixture: 2.1 MB binary image
+└── 100Pages.pdf               Fixture: 9.5 MB binary PDF
+```
+
+Six of those files have nothing to do with the service, and they are **not**
+abandoned clutter — they are deliberate multi-format fixtures. Two properties
+surprise people often enough to state here:
+
+- `LoginTest.java` **will not compile**, and that is intentional. Its `main`
+  method body is the bare, unresolved identifier `Web`. Source:
+  `LoginTest.java:L7`. It is not a bug awaiting a fix, and nothing in this
+  repository compiles it.
+- `test.txt.txt` is **0 bytes on purpose**. Its emptiness is the fixture. Do not
+  prune it.
+
+Each fixture's verified properties and the preservation policy are in
+[docs/repository-assets.md](docs/repository-assets.md).
+
+### Documentation map
+
+| Page | What it covers |
+| --- | --- |
+| [docs/README.md](docs/README.md) | Documentation index, reading order, and glossary |
+| [docs/getting-started/installation.md](docs/getting-started/installation.md) | Prerequisites, install, run, verify, stop |
+| [docs/getting-started/configuration.md](docs/getting-started/configuration.md) | The two configuration constants and how to change them |
+| [docs/api/http-api.md](docs/api/http-api.md) | The HTTP contract, in full |
+| [docs/api/server-module.md](docs/api/server-module.md) | Code-level reference for all seven documented symbols |
+| [docs/guides/deployment.md](docs/guides/deployment.md) | Deployment runbook and hardening caveats |
+| [docs/guides/troubleshooting.md](docs/guides/troubleshooting.md) | Symptom-to-remedy matrix and decision tree |
+| [docs/architecture/overview.md](docs/architecture/overview.md) | Component model, startup flow, lifecycle states |
+| [docs/architecture/request-lifecycle.md](docs/architecture/request-lifecycle.md) | Request handling, step by step |
+| [docs/architecture/code-walkthrough.md](docs/architecture/code-walkthrough.md) | Annotated reading of all 14 lines |
+| [docs/repository-assets.md](docs/repository-assets.md) | The six non-application fixtures |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to author and validate documentation here |
+
+## Known limitations and non-goals
+
+Every item below is absent by design, not by oversight. Documentation describes
+their absence rather than promising them.
+
+- **No TLS or HTTPS.** Traffic is plain HTTP.
+- **No authentication or authorisation.** Every caller is equal, and anonymous.
+- **No routing.** One response, whatever the path.
+- **No method differentiation.** One response, whatever the method.
+- **No rate limiting.** Nothing bounds request volume.
+- **No graceful shutdown.** No signal handler, no connection draining.
+- **No structured logging.** One banner line at startup; requests are not
+  logged.
+- **No health-check endpoint.** The catch-all response is the only signal.
+- **No error-handling middleware.** No `4xx` or `5xx` code path exists.
+- **No environment-variable configuration.** `process.env` is never read.
+- **No test suite.** `npm test` is the npm-init placeholder and exits non-zero
+  on purpose.
+- **No containerisation, CI, or deployment pipeline.** No `Dockerfile`, no
+  compose file, no workflow definitions.
+
+## License
+
+Released under the MIT License, matching the `license` field in
+`package.json`. The full text is in [LICENSE](LICENSE).

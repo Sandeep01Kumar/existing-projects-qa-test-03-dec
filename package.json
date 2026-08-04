@@ -18,7 +18,7 @@
         "test": "echo \"Error: no test specified\" && exit 1",
         "docs:preflight": "node tools/check-doc-runtime.js",
         "docs:api": "node tools/check-doc-runtime.js && jsdoc -c jsdoc.json",
-        "docs:md": "node tools/check-doc-runtime.js && node -e \"require('fs').mkdirSync('docs/api/generated', { recursive: true })\" && npx --yes jsdoc-to-markdown@9.1.3 --files server.js > docs/api/generated/server-module.md",
+        "docs:md": "node tools/render-module-markdown.js",
         "docs:lint": "node tools/check-doc-runtime.js && markdownlint-cli2",
         "docs:links": "node tools/check-links.js",
         "docs:check": "npm run docs:lint && npm run docs:links"

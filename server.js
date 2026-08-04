@@ -71,7 +71,7 @@
  * // Captured stdout, exactly one line:
  * //   Server running at http://127.0.0.1:3000/
  *
- * @see {@link https://nodejs.org/docs/latest-v22.x/api/http.html|Node.js `http` module documentation}
+ * @see {@link https://nodejs.org/docs/latest-v22.x/api/http.html|Node.js http module documentation}
  */
 /**
  * @callback RequestHandler
@@ -192,7 +192,7 @@
  * @constant
  * @type {module:http}
  * @requires http
- * @see {@link https://nodejs.org/docs/latest-v22.x/api/http.html|Node.js `http` module documentation}
+ * @see {@link https://nodejs.org/docs/latest-v22.x/api/http.html|Node.js http module documentation}
  */
 const http = require('http'); // Loads Node's built-in HTTP module; a core module, so no npm install is involved.
 
@@ -247,8 +247,8 @@ const port = 3000; // The TCP port the listener will bind.
  *
  * @constant {http.Server}
  * @type {http.Server}
- * @see {@link https://nodejs.org/docs/latest-v22.x/api/http.html#class-httpserver|Node.js `http.Server` class documentation}
- * @see {@link https://nodejs.org/docs/latest-v22.x/api/http.html#httpcreateserveroptions-requestlistener|Node.js `http.createServer()` documentation}
+ * @see {@link https://nodejs.org/docs/latest-v22.x/api/http.html#class-httpserver|Node.js http.Server class documentation}
+ * @see {@link https://nodejs.org/docs/latest-v22.x/api/http.html#httpcreateserveroptions-requestlistener|Node.js http.createServer() documentation}
  */
 const server = http.createServer((req, res) => { // Instantiates an http.Server and registers the per-request listener.
   res.statusCode = 200; // Sets the status line; must precede any body byte written.

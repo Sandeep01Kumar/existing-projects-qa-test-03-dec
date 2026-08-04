@@ -73,6 +73,21 @@
  * Relative and `#anchor` links -- the integrity this gate exists for -- are
  * checked exactly as before.
  *
+ * ## Filesystem policy
+ *
+ * A link that leaves the repository is the same class of problem spelled locally:
+ * nobody reading the documentation can follow it, and dereferencing it lets a
+ * documentation change probe the filesystem of whoever runs the gate. Two layers
+ * close it. First, {@link traversalPatternsFor} adds a rejection pattern computed
+ * from the depth of the page being checked, so a run of `../` that would leave the
+ * repository is rewritten to a sentinel before the checker resolves anything -- a
+ * threshold the policy file cannot express, because it is loaded once for the run
+ * while the safe depth differs per page. Second,
+ * {@link assertWithinRepository} resolves every remaining relative target and
+ * fails any that lands outside the repository root, whatever spelling produced it,
+ * and reports it without its status code so the transcript cannot disclose whether
+ * a host path exists.
+ *
  * @example
  * // As a command, which is how the docs:links npm script invokes it:
  * //   $ node tools/check-links.js
@@ -236,10 +251,33 @@ const IGNORED_DIRECTORIES = [
  * `dead` means the link was checked and is not reachable. `error` means the check
  * itself could not be completed, which is not evidence that the link is fine --
  * treating it as a pass is exactly the defect this gate was written to remove.
+ * `rejected` is this gate's own status, assigned by
+ * {@link assertWithinRepository} to a link that resolves outside the repository:
+ * such a link is neither reachable for a reader nor safe to report on, so it fails
+ * the run without its reachability ever being disclosed.
  *
  * @constant {string[]}
  */
-const FAILING_STATUSES = ['dead', 'error'];
+const FAILING_STATUSES = ['dead', 'error', 'rejected'];
+
+/**
+ * Status assigned to a link that resolves outside the repository root.
+ *
+ * @constant {string}
+ * @default 'rejected'
+ */
+const REJECTED_STATUS = 'rejected';
+
+/**
+ * Prefix every rejection sentinel in `.markdown-link-check.json` begins with.
+ *
+ * A link that has already been rewritten to a sentinel was rejected by the policy
+ * before it could be dereferenced, so the containment assertion leaves it alone
+ * rather than reporting the same target twice under two different reasons.
+ *
+ * @constant {string}
+ */
+const REJECTION_SENTINEL_PREFIX = './REJECTED-BY-LINK-POLICY-';
 
 /**
  * How many times a file is checked when its previous attempt produced `error`
@@ -269,7 +307,8 @@ const STATUS_MARKERS = {
   alive: '+',
   ignored: '-',
   dead: 'x',
-  error: '!'
+  error: '!',
+  rejected: 'x'
 };
 
 /**
@@ -295,6 +334,117 @@ function toFileUrl(absolutePath) {
  */
 function toPosix(relativePath) {
   return relativePath.split(path.sep).join('/');
+}
+
+/**
+ * How many directory levels separate a page from the repository root.
+ *
+ * @param {string} relativePath Repository-relative POSIX path of the page.
+ * @returns {number} `0` for a page at the root, `1` for `docs/README.md`, `2` for
+ *   `docs/api/http-api.md`, and so on.
+ */
+function depthOf(relativePath) {
+  const directory = path.posix.dirname(toPosix(relativePath));
+
+  return directory === '.' || directory === '' ? 0 : directory.split('/').length;
+}
+
+/**
+ * Builds the traversal rejection patterns that apply to one specific page.
+ *
+ * The policy file cannot express this, because it is loaded once for the whole run
+ * while the number of `../` segments that escapes the repository depends on how
+ * deep the page holding the link sits: `../../README.md` is a legitimate
+ * cross-reference from `docs/getting-started/installation.md` and a root escape
+ * from `README.md`. A single static pattern therefore has to choose between
+ * rejecting legitimate cross-references and letting shallow escapes through -- and
+ * the earlier version of this gate chose the latter, so `../../package.json` in a
+ * root-level page was dereferenced against the host filesystem and reported alive.
+ *
+ * Computing the threshold per file removes that choice: for a page at depth `d`,
+ * `d` leading `../` segments reach the repository root and anything beyond that
+ * leaves it, so `d + 1` or more is always an escape. Matching here means the
+ * target is rewritten to a sentinel *before* the checker resolves it, so no
+ * filesystem access happens at all.
+ *
+ * @param {string} relativePath Repository-relative path of the page being checked.
+ * @returns {Object[]} `markdown-link-check` replacement patterns for this page.
+ */
+function traversalPatternsFor(relativePath) {
+  const escapingSegments = depthOf(relativePath) + 1;
+
+  return [
+    {
+      pattern: `^(\\.{2}/){${escapingSegments},}.*$`,
+      replacement: `${REJECTION_SENTINEL_PREFIX}path-traversal-above-repository-root`
+    }
+  ];
+}
+
+/**
+ * Fails every link that resolves outside the repository, without revealing whether
+ * its target exists.
+ *
+ * {@link traversalPatternsFor} and the policy's own patterns stop the spellings
+ * documentation actually contains -- a leading run of `../`, an absolute path, an
+ * absolute URL -- before the checker touches the filesystem. This assertion is the
+ * layer beneath that, and it is deliberately independent of how the target is
+ * spelled: it resolves each relative target the way the checker does and compares
+ * the result against the repository root, so a contrived form such as
+ * `./../../x` or `a/../../../x` cannot slip through a regex and be reported alive.
+ *
+ * The rewritten result carries neither the original status nor a status code. That
+ * is the point: an out-of-repository link is a defect whichever answer the
+ * filesystem gave, and reporting `ALIVE` versus `DEAD` for it would turn this
+ * gate's transcript into a host-path existence oracle for untrusted Markdown.
+ *
+ * @param {string} relativePath Repository-relative path of the page checked.
+ * @param {Object[]} results The checker's results for that page.
+ * @returns {Object[]} The results, with escaping links replaced by rejections.
+ */
+function assertWithinRepository(relativePath, results) {
+  const pageDirectory = path.dirname(path.join(PROJECT_ROOT, relativePath));
+  const rootWithSeparator = PROJECT_ROOT.endsWith(path.sep) ? PROJECT_ROOT : PROJECT_ROOT + path.sep;
+
+  return results.map((result) => {
+    const link = typeof result.link === 'string' ? result.link : '';
+
+    // Same-page anchors address the page itself, links the policy already rejected
+    // carry a sentinel, and a link the policy ignored was never resolved as a path
+    // -- none of the three can escape the repository.
+    if (link === '' || link.startsWith('#') || link.startsWith(REJECTION_SENTINEL_PREFIX) || result.status === 'ignored') {
+      return result;
+    }
+
+    // A target carrying a scheme or an authority is not a filesystem path, so it is
+    // out of this assertion's scope; the policy's patterns own those cases.
+    if (/^[A-Za-z][A-Za-z0-9+.\-]*:/.test(link) || link.startsWith('//')) {
+      return result;
+    }
+
+    const target = link.split('#')[0].split('?')[0];
+
+    if (target === '') {
+      return result;
+    }
+
+    // `path.resolve` returns an absolute target unchanged, which is exactly the
+    // reading this gate wants: a link beginning with `/` addresses the filesystem
+    // root of whatever machine runs the check, never the repository root, so it
+    // lands outside the repository and is rejected below.
+    const resolved = path.resolve(pageDirectory, target);
+
+    if (resolved === PROJECT_ROOT || resolved.startsWith(rootWithSeparator)) {
+      return result;
+    }
+
+    return {
+      link: result.link,
+      status: REJECTED_STATUS,
+      statusCode: undefined,
+      err: { code: 'OUTSIDE_REPOSITORY' }
+    };
+  });
 }
 
 /**
@@ -402,6 +552,15 @@ function checkMarkdown(markdownLinkCheck, relativePath, markdown, policy) {
     showProgressBar: false
   }, policy);
 
+  // The policy's own patterns are kept first so their sentinels win, then the
+  // depth-aware traversal patterns for this particular page are appended. Order is
+  // safe in both directions: every sentinel begins with `./`, so a `../` pattern
+  // can never re-match one.
+  options.replacementPatterns = [
+    ...(Array.isArray(policy.replacementPatterns) ? policy.replacementPatterns : []),
+    ...traversalPatternsFor(relativePath)
+  ];
+
   return new Promise((resolve, reject) => {
     try {
       markdownLinkCheck(markdown, options, (error, results) => {
@@ -471,7 +630,10 @@ async function checkFile(markdownLinkCheck, relativePath, policy) {
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_FILE; attempt += 1) {
     try {
-      outcome.results = await checkMarkdown(markdownLinkCheck, relativePath, markdown, policy);
+      outcome.results = assertWithinRepository(
+        relativePath,
+        await checkMarkdown(markdownLinkCheck, relativePath, markdown, policy)
+      );
       outcome.problem = null;
     } catch (cause) {
       outcome.results = [];
@@ -544,6 +706,7 @@ function reportInventory(missing, unexpected) {
  * @param {number} totals.dead Links found unreachable.
  * @param {number} totals.errored Links whose check could not be completed.
  * @param {number} totals.ignored Links skipped by an ignore pattern.
+ * @param {number} totals.rejected Links that resolve outside the repository.
  * @param {number} totals.problems Files that could not be checked at all.
  * @param {number} totals.missing Planned pages not authored yet.
  * @param {number} totals.unexpected Authored pages not in the plan.
@@ -553,10 +716,11 @@ function reportSummary(totals) {
   process.stdout.write('\nLink check summary\n');
   process.stdout.write(`    files checked   : ${totals.filesChecked}\n`);
   process.stdout.write(`    links checked   : ${totals.linksChecked}\n`);
-  process.stdout.write(`    alive           : ${totals.linksChecked - totals.dead - totals.errored - totals.ignored}\n`);
+  process.stdout.write(`    alive           : ${totals.linksChecked - totals.dead - totals.errored - totals.ignored - totals.rejected}\n`);
   process.stdout.write(`    ignored         : ${totals.ignored}\n`);
   process.stdout.write(`    dead            : ${totals.dead}\n`);
   process.stdout.write(`    errored         : ${totals.errored}\n`);
+  process.stdout.write(`    rejected        : ${totals.rejected}\n`);
   process.stdout.write(`    unchecked files : ${totals.problems}\n`);
   process.stdout.write(`    missing pages   : ${totals.missing}\n`);
   process.stdout.write(`    unexpected pages: ${totals.unexpected}\n`);
@@ -612,6 +776,7 @@ async function run() {
     dead: 0,
     errored: 0,
     ignored: 0,
+    rejected: 0,
     problems: 0,
     missing: missing.length,
     unexpected: unexpected.length
@@ -636,6 +801,7 @@ async function run() {
     totals.dead += outcome.results.filter((result) => result.status === 'dead').length;
     totals.errored += outcome.results.filter((result) => result.status === 'error').length;
     totals.ignored += outcome.results.filter((result) => result.status === 'ignored').length;
+    totals.rejected += outcome.results.filter((result) => result.status === REJECTED_STATUS).length;
 
     if (outcome.results.length === 0) {
       process.stdout.write('    (no links)\n');
@@ -659,7 +825,7 @@ async function run() {
   }
 
   if (failedFiles.length > 0) {
-    process.stderr.write(`\nFAIL: ${totals.dead} dead link(s), ${totals.errored} unchecked link(s) and ${totals.problems} unchecked file(s) across ${failedFiles.length} file(s):\n`);
+    process.stderr.write(`\nFAIL: ${totals.dead} dead link(s), ${totals.errored} unchecked link(s), ${totals.rejected} link(s) resolving outside the repository and ${totals.problems} unchecked file(s) across ${failedFiles.length} file(s):\n`);
 
     for (const file of failedFiles) {
       process.stderr.write(`    ${file}\n`);
@@ -683,9 +849,14 @@ module.exports = {
   IGNORED_DIRECTORY_NAMES,
   IGNORED_DIRECTORIES,
   FAILING_STATUSES,
+  REJECTED_STATUS,
+  REJECTION_SENTINEL_PREFIX,
   MAX_ATTEMPTS_PER_FILE,
   toFileUrl,
   toPosix,
+  depthOf,
+  traversalPatternsFor,
+  assertWithinRepository,
   loadLinkPolicy,
   discoverMarkdownFiles,
   resolveCorpus,

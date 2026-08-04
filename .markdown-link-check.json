@@ -123,14 +123,46 @@
         },
         {
             "$comment": [
+                "Bare absolute POSIX paths such as `/etc/passwd`, `/tmp` or",
+                "`/docs/api/http-api.md`. These carry no scheme and no authority, so",
+                "none of the patterns above sees them, yet link-check resolves a leading",
+                "`/` against the filesystem root of the machine running the gate rather",
+                "than against the repository. Two things went wrong as a result: a link",
+                "that no reader could ever follow was reported ALIVE - the exact",
+                "false-success this gate exists to eliminate - and the ALIVE/DEAD verdict",
+                "leaked whether a given host path exists, turning gate output into a",
+                "filesystem oracle for untrusted Markdown. Rewriting them here rejects",
+                "both spellings of the problem at once: a repository-relative link is",
+                "what documentation should use, so an absolute path is always a defect",
+                "worth failing loudly. This pattern is ordered after `^//.*$` so a",
+                "scheme-relative URL is still reported as the scheme-relative case, and",
+                "it cannot re-match an earlier sentinel because every sentinel begins",
+                "with `./`."
+            ],
+            "pattern": "^/.*$",
+            "replacement": "./REJECTED-BY-LINK-POLICY-absolute-path-was-not-dereferenced"
+        },
+        {
+            "$comment": [
                 "Relative paths that climb above the repository root, which would let a",
                 "documentation change read arbitrary files on the machine running the",
                 "gate - the same local-file oracle as an absolute `file:` URL, just",
                 "spelled relatively. Three or more consecutive `../` segments are always",
-                "an escape: the deepest authored page sits two directories below the root",
-                "(docs/<section>/<page>.md), so `../../` already reaches the root and is",
-                "left working. Legitimate links such as `../../README.md` are therefore",
-                "unaffected."
+                "an escape, whatever page they appear on, because the deepest authored",
+                "page sits two directories below the root (docs/<section>/<page>.md).",
+                "",
+                "This static pattern is deliberately the loosest of the traversal checks,",
+                "for a reason worth stating: whether `../` escapes depends on how deep",
+                "the page holding the link sits. `../../README.md` is a legitimate link",
+                "from docs/<section>/<page>.md and a root escape from README.md, and no",
+                "single regex in this file can tell those two apart, because this file is",
+                "loaded once for the whole run. Rejecting every `../` here would break",
+                "the corpus's own cross-references. tools/check-links.js therefore adds",
+                "a depth-aware pattern per file, and independently asserts that every",
+                "relative link resolves inside the repository - see that file's",
+                "traversalPatternsFor() and assertWithinRepository(). This entry remains",
+                "as the always-true case and as the backstop for any consumer that reads",
+                "this policy without that script."
             ],
             "pattern": "^.*\\.\\./\\.\\./\\.\\./.*$",
             "replacement": "./REJECTED-BY-LINK-POLICY-path-traversal-above-repository-root"

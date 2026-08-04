@@ -249,11 +249,20 @@
     // every invocation route -- npm script, bare npx, or an editor integration
     // -- honours exactly the same set. They mirror .gitignore one-for-one.
     //
-    //   node_modules/**        Materialised by `npm install` resolving the three
+    //   **/node_modules/**    Materialised by `npm install` resolving the three
     //                         documentation devDependencies, after which it may
     //                         contain many third-party *.md files. None of them
     //                         are ours to lint, and leaving the directory in
     //                         would bury real findings under upstream noise.
+    //                         The leading `**/` matters: a root-anchored
+    //                         `node_modules/**` misses a *nested* installed tree
+    //                         (for example tools/node_modules/**), and one such
+    //                         directory is enough to turn a one-file lint run
+    //                         into thousands of upstream findings. Matching the
+    //                         directory at any depth mirrors how
+    //                         tools/check-links.js already skips it -- by name
+    //                         rather than by path -- so the lint gate and the
+    //                         link gate cover exactly the same corpus.
     //
     //   docs/api/generated/**  Generated output, of both kinds: `npm run docs:api`
     //                         writes the JSDoc HTML reference here, and
@@ -269,7 +278,7 @@
     //                         regenerated, so linting the artefact itself adds
     //                         nothing.
     "ignores": [
-        "node_modules/**",
+        "**/node_modules/**",
         "docs/api/generated/**"
     ]
 }
