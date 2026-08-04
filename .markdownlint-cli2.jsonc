@@ -1,0 +1,213 @@
+// ---------------------------------------------------------------------------
+// markdownlint-cli2 configuration for hao-backprop-test / hello_world
+// ---------------------------------------------------------------------------
+//
+// PURPOSE
+//   Makes the documentation conventions machine-checkable rather than only
+//   reviewed by eye. The authored markdown corpus is 13 files -- README.md,
+//   CONTRIBUTING.md and 11 pages under docs/ -- and this configuration is the
+//   gate that fails when one of them drifts away from the agreed conventions.
+//
+//   This repository ships no style guide to inherit: there is no .editorconfig,
+//   no .prettierrc, no .eslintrc* and no style document of any kind. The
+//   conventions below are therefore ESTABLISHED here, and this file is what
+//   makes them enforceable.
+//
+//   Provenance of every setting: the documentation plan's stated conventions
+//   (ATX headings, one H1 per document, no skipped heading levels, an explicit
+//   language hint on every fenced block) and the repository's own observable
+//   state (its single existing heading is ATX). Each setting's comment names
+//   which of those it comes from, so nothing here rests on an assumption.
+//
+// HOW IT IS RUN
+//   npm run docs:lint    -> markdownlint-cli2 over the authored corpus
+//   npm run docs:check   -> docs:lint followed by docs:links
+//   npx markdownlint-cli2 (no arguments) -> uses the "globs" below
+//
+// DISCOVERY
+//   markdownlint-cli2 locates its configuration by EXACT filename. The name
+//   ".markdownlint-cli2.jsonc" is the highest-precedence entry in its search
+//   list. A near-miss such as ".markdownlint.jsonc" or
+//   ".markdownlint-cli2.json" is silently ignored, which turns the whole gate
+//   into a no-op that still reports success -- so the filename matters as much
+//   as the contents.
+//
+// EDITING POLICY
+//   Every rule switched off here is a convention the corpus stops being held
+//   to. When the lint fails, fix the markdown; only revisit this file if a rule
+//   genuinely conflicts with a documented requirement. Exactly two relaxations
+//   are authorised (see MD013 and the note at MD033); do not add a third.
+//
+//   Verified against markdownlint-cli2 0.23.2 / markdownlint 0.41.1, the
+//   versions pinned in package.json devDependencies. Every option name below
+//   exists in that version's configuration schema.
+// ---------------------------------------------------------------------------
+{
+    // Schema for editor completion and validation of THIS file. Pinned to the
+    // same markdownlint-cli2 version as package.json devDependencies so the
+    // reference cannot drift away from the tool that consumes it.
+    "$schema": "https://raw.githubusercontent.com/DavidAnson/markdownlint-cli2/v0.23.2/schema/markdownlint-cli2-config-schema.json",
+
+    // markdownlint rule configuration. Anything not named here keeps its
+    // upstream default, which "default": true holds in the enabled state.
+    "config": {
+        // Start from "every rule enabled". Named entries below either restate
+        // a convention explicitly (so a reader sees it is deliberate) or apply
+        // one of the two authorised relaxations. Nothing is disabled wholesale.
+        "default": true,
+
+        // MD001/heading-increment -- heading levels never skip (no h2 -> h4).
+        // Stated explicitly because it matters most in the long README and in
+        // the deeply sectioned architecture pages, where a skipped level breaks
+        // the generated table of contents.
+        "MD001": true,
+
+        // MD003/heading-style -- ATX headings ("# Heading"), never setext.
+        // Matches the one heading precedent the repository already has:
+        // "# hao-backprop-test" (README.md:L1). Default is "consistent", which
+        // would accept a setext document as long as it were uniform; "atx"
+        // fixes the style across every file instead.
+        "MD003": {
+            "style": "atx"
+        },
+
+        // MD013/line-length -- AUTHORISED RELAXATION 1 of 2.
+        //
+        // The rule stays ENABLED. Only two of its sub-checks are switched off,
+        // and each is switched off because the corpus cannot be written
+        // correctly with it on:
+        //
+        //   "tables": false
+        //     The corpus is table-heavy by design -- the request-matching
+        //     matrix, the response-field matrix, the response-header table, the
+        //     configuration-option matrix, the manifest-field table, the
+        //     repository-fixture inventory and the 14-row line-by-line
+        //     walkthrough table. A markdown table row cannot be wrapped: a
+        //     newline ends the row and destroys the table. Exempting table rows
+        //     is therefore necessary, not cosmetic.
+        //
+        //   "code_blocks": false
+        //     Captured command output must be pasted literally -- the verbatim
+        //     `node server.js` startup banner and the `curl -i` responses with
+        //     their status line and headers. Rewrapping a captured transcript
+        //     to fit a column budget would falsify it, and documenting output
+        //     that was never produced is worse than a long line.
+        //
+        // "line_length" is deliberately left at its upstream default. Prose IS
+        // still length-checked: markdown treats a single newline as a soft
+        // wrap, so paragraphs can be wrapped without changing how they render.
+        // These two exemptions are the only line-length relaxations authorised;
+        // do not add a third.
+        "MD013": {
+            "tables": false,
+            "code_blocks": false
+        },
+
+        // MD025/single-title -- exactly one H1 per document. Every page opens
+        // with its own title and uses H2+ for sections thereafter.
+        "MD025": true,
+
+        // MD033/no-inline-html -- AUTHORISED RELAXATION 2 of 2, and the
+        // relaxation is "leave it exactly as upstream ships it". Restated here
+        // as `true` (identical to the default: enabled, with an empty
+        // allowed_elements list) purely so a reader can see the position was
+        // decided rather than overlooked.
+        //
+        // It is NOT disabled: the corpus is authored as portable markdown, so
+        // raw HTML in prose stays an error. It is NOT tightened either -- no
+        // allowed_elements entries are added.
+        //
+        // Note this does not conflict with Mermaid. markdown-it never parses
+        // the contents of a fenced code block as inline HTML, so HTML inside a
+        // diagram node label is invisible to this rule -- for example the label
+        // `R7["R7 Comment every line<br/>(rule Sk-Rule-)"]`, taken from the
+        // requirement-traceability flowchart, keeps its `<br/>` line break
+        // without tripping MD033. Verified: the same `<span>` that fails in
+        // prose passes inside a ```mermaid fence.
+        "MD033": true,
+
+        // MD040/fenced-code-language -- every fenced code block carries an
+        // explicit language hint, and the hint must be one of the six the
+        // corpus is allowed to use.
+        //
+        //   "allowed_languages"
+        //     An explicit allow-list rather than a bare "enabled". The rule's
+        //     default is an empty list, which accepts ANY word as a language
+        //     and would let a stray "sh", "console" or "shell" quietly widen
+        //     the vocabulary; naming the six keeps it fixed. This is not a
+        //     relaxation -- it is strictly stronger than the default.
+        //
+        //   bash       shell commands and their captured output
+        //   http       request/response exchanges
+        //   javascript server.js excerpts and JSDoc examples
+        //   json       package.json / jsdoc.json excerpts
+        //   mermaid    all eight diagrams (DG1-DG8); the hint is exactly what
+        //              makes GitHub render them natively, so it must never be
+        //              stripped to satisfy a linter
+        //   text       directory trees and plain terminal transcripts
+        "MD040": {
+            "allowed_languages": [
+                "bash",
+                "http",
+                "javascript",
+                "json",
+                "mermaid",
+                "text"
+            ]
+        },
+
+        // MD041/first-line-heading -- every document's first line is its H1, so
+        // no page starts with a badge row, a blurb or a stray paragraph.
+        "MD041": true
+    },
+
+    // Files to lint when markdownlint-cli2 is invoked without command-line
+    // globs (for example a bare `npx markdownlint-cli2`). markdownlint-cli2
+    // APPENDS these to any globs given on the command line rather than
+    // replacing them, so `npm run docs:lint` and a bare invocation both end up
+    // covering the same set.
+    //
+    // "**/*.md" is used in preference to a literal 13-entry list on purpose. A
+    // literal list has to be edited every time a page is added, and the failure
+    // mode when someone forgets is silent: the new page is simply never linted.
+    // A recursive glob plus the two "ignores" below covers the entire authored
+    // corpus and nothing else, so no page can be missed:
+    //
+    //     README.md                                    1
+    //     CONTRIBUTING.md                              1
+    //     docs/README.md                               1
+    //     docs/repository-assets.md                    1
+    //     docs/getting-started/*.md                    2  installation, configuration
+    //     docs/api/*.md                                2  http-api, server-module
+    //     docs/guides/*.md                             2  deployment, troubleshooting
+    //     docs/architecture/*.md                       3  overview, request-lifecycle,
+    //                                                     code-walkthrough
+    //                                                 --
+    //                                                 13  authored markdown files
+    "globs": [
+        "**/*.md"
+    ],
+
+    // Paths excluded from the recursive glob above. These live here rather than
+    // in the npm script so that `scripts.docs:lint` in package.json stays
+    // simple and every invocation route -- npm script, bare npx, or an editor
+    // integration -- honours the same exclusions. They mirror .gitignore
+    // one-for-one.
+    //
+    //   node_modules/**        Materialised by `npm install` resolving the three
+    //                         documentation devDependencies, and currently home
+    //                         to several hundred third-party *.md files. None of
+    //                         it is ours to lint, and leaving it in would bury
+    //                         real findings under upstream noise.
+    //
+    //   docs/api/generated/**  JSDoc HTML/markdown output produced by
+    //                         `npm run docs:api` from the annotations in
+    //                         server.js. It is git-ignored build output, is
+    //                         never the target of an authored link, and cannot
+    //                         be corrected at source -- linting it would report
+    //                         violations that nobody can fix.
+    "ignores": [
+        "node_modules/**",
+        "docs/api/generated/**"
+    ]
+}

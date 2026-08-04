@@ -1,11 +1,9 @@
-# Installed npm packages.
-# The documentation toolchain (jsdoc, markdownlint-cli2, markdown-link-check) is
-# declared in devDependencies, so `npm install` materialises this directory.
-# It is reproducible from package-lock.json and must never be committed.
+# Installed npm packages. Materialised by `npm install` from package-lock.json,
+# which resolves the documentation toolchain declared in devDependencies
+# (jsdoc, markdownlint-cli2, markdown-link-check). Reproducible, so never committed.
 node_modules/
 
-# Generated JSDoc output.
-# Produced by `npm run docs:api` from the annotations in server.js.
-# Authored documentation lives in docs/**.md; this directory is build output only,
-# is never the target of an authored link, and must never be committed.
+# Generated JSDoc output. Written here by `npm run docs:api` and `npm run docs:md`
+# from the annotations in server.js. Build product only: the authored documentation
+# under docs/ is committed instead, and no authored link ever points in here.
 docs/api/generated/
