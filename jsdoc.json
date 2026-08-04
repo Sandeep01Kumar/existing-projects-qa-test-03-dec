@@ -1,0 +1,27 @@
+{
+    "source": {
+        "include": [
+            "server.js"
+        ],
+        "includePattern": ".+\\.js$",
+        "excludePattern": "(^|[\\\\/])(node_modules|docs)[\\\\/]"
+    },
+    "opts": {
+        "destination": "docs/api/generated/",
+        "encoding": "utf8",
+        "recurse": false
+    },
+    "plugins": [
+        "plugins/markdown"
+    ],
+    "tags": {
+        "allowUnknownTags": false,
+        "dictionaries": [
+            "jsdoc"
+        ]
+    },
+    "templates": {
+        "cleverLinks": false,
+        "monospaceLinks": false
+    }
+}
