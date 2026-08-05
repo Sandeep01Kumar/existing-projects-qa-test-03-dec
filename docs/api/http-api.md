@@ -423,16 +423,37 @@ Connection: close
 
 An unsupported expectation — `Expect: bogus` — was refused by Node itself, and
 the greeting never appeared, which is the direct evidence that the listener
-never ran:
+never ran. These were the request bytes, and they carry no `Connection` header,
+so the request expressed no framing preference:
+
+```http
+POST / HTTP/1.1
+Host: 127.0.0.1:3000
+Expect: bogus
+Content-Length: 0
+```
 
 ```http
 HTTP/1.1 417 Expectation Failed
-Date: Tue, 04 Aug 2026 20:06:06 GMT
-Connection: close
+Date: Wed, 05 Aug 2026 01:04:32 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
 Transfer-Encoding: chunked
 
 0
 ```
+
+The connection is **kept alive** after a `417`. The status is Node's, but the
+framing wrapped around it is the ordinary HTTP/1.1 framing recorded in
+[Framing that varies with the request](#framing-that-varies-with-the-request-observed-behaviour).
+Adding `Connection: close` to that same request replaces those two headers with
+a single `Connection: close`, exactly as the second row of that table describes,
+and that is the only way to obtain a close-framed `417` from this service. The
+status also depends on the protocol version: an HTTP/1.0 request carrying
+`Expect: bogus` is answered with the ordinary `200` instead, because HTTP/1.0
+defines no expectation for the runtime to refuse. Every other request shape
+tried — `GET` with no body, `POST` with the body withheld, sent, or chunked, and
+`Expect: 999-continue` — produced that same head apart from `Date`.
 
 `Expect: 100-continue` is the one expectation Node honours by default. It
 writes an interstitial informational response and then hands the request to the

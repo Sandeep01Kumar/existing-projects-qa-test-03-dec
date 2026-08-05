@@ -71,9 +71,29 @@ files can be quoted from a single verified snapshot.
 | `README.md` | 73 | 2 (before the rewrite) | The only markdown file in the repository at the baseline |
 | `test.txt.txt` | 0 | 0 | Fixture — empty plain text |
 
-Sizes were read with `stat -c '%s' <file>` and line counts with `wc -l <file>`,
-both read-only, both on Linux. `stat -c` is the GNU form and is **not**
-portable, so the same measurements elsewhere are:
+Sizes were read with `stat -c '%s' <file>` and content-line counts with
+`awk 'END{print NR}' <file>`, both read-only, both on Linux. `awk` is named
+rather than `wc -l` because the two disagree on one row: `wc -l` counts newline
+characters, so a file whose final line is not newline-terminated reads one line
+short. The baseline `package.json` is exactly that file: it ends at its closing
+brace with no trailing newline, so `wc -l` returns 10 against the 11 content
+lines tabulated above. On every other text row the two commands agree exactly,
+`test.txt.txt` included: with no content at all, both report 0. Both numbers
+are visible at once by reading the file out of the baseline commit, which is
+also the only way to reproduce them now that the working tree has moved on:
+
+```bash
+git show 5b4acbb:package.json | awk 'END{print NR}'
+git show 5b4acbb:package.json | wc -l
+```
+
+```text
+11
+10
+```
+
+`stat -c` is the GNU form and is **not** portable, so the same measurements
+elsewhere are:
 
 | Platform | Exact byte size of a file |
 | --- | --- |

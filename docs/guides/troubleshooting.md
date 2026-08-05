@@ -94,14 +94,41 @@ one host. `Source: server.js:L4` The bind itself happens in the `server.listen`
 call. `Source: server.js:L12`
 
 Reproduce it by starting a second instance while the first still holds the port.
-The second process exits immediately, so this does not block:
+The second process exits immediately, so this does not block. The block is also
+self-cleaning, which matters in a guide you are reading while something is
+already wrong: the first instance's PID is captured at spawn so the last two
+lines can undo exactly what the first line did, and its log is written outside
+the repository so no untracked file is left in your working tree.
 
 ```bash
-node server.js > instance-1.log 2>&1 &
+node server.js > "${TMPDIR:-/tmp}/instance-1.log" 2>&1 &
+first_pid=$!
 sleep 1
 node server.js
 echo "exit code: $?"
+kill "$first_pid"
+rm -f "${TMPDIR:-/tmp}/instance-1.log"
 ```
+
+Two lines produce output. The second `node server.js` writes the trace
+reproduced below to stderr, and `echo` reports its status as `exit code: 1`. The
+`kill` and `rm -f` lines print nothing of their own. An interactive `bash`
+session does add one line about the background job it has just lost, captured
+here from a live session:
+
+```text
+[1]+  Terminated              node server.js > "${TMPDIR:-/tmp}/instance-1.log" 2>&1
+```
+
+That is your shell reporting on its own job table rather than the service saying
+anything, and it does not appear at all when the block is run from a script,
+where the two cleanup lines are completely silent.
+
+Signalling `$first_pid` rather than a PID discovered from the port is
+deliberate: a PID captured at spawn cannot name a process this block did not
+start. The remediation sections below have to discover the PID instead, because
+there the process holding the port is someone else's, and they pair the
+discovery with an identity check this block does not need.
 
 ### What is stable, and what is not
 
@@ -116,19 +143,27 @@ matching against. These parts are stable and are what identify the failure:
 | `errno` | Platform-specific (`-98` on Linux; it differs on macOS and Windows) |
 | Exit behaviour | Fatal. The process exits **1** and the startup banner is never printed |
 
-The **stack frames are not stable**. Their `node:net` and `node:internal` line
-numbers come from the runtime's own source, so they change between Node versions
-and can differ between platforms. Match on the error code, the address and the
-port; never on a frame's line number.
+**Nothing the runtime prints against one of its own sources is stable.** Read
+that as a class rather than as a list: any line number printed against a
+`node:*` source is volatile, whatever the module prefix. In the trace below that
+covers the `node:events:NNN` header on the first line, the `node:net` frames,
+the `node:internal` frame, the caret column marking where the throw happened,
+and the trailing `Node.js vX.Y.Z` line — all of them come from the runtime's own
+source, so they change between Node versions and can differ between platforms.
+Match on the error code, the address and the port; never on a line number.
 
 ### The captured failure
 
 The first process is unaffected — it keeps the port and keeps serving. The
 second writes **nothing at all to stdout**, so the startup banner never
-appears, and writes this complete trace to stderr, captured on **Linux x86_64
-with Node v22.23.2** with nothing elided:
+appears, and writes this trace to stderr, captured on **Linux x86_64 with Node
+v22.23.2** — all twenty lines of it, nothing elided:
 
 ```text
+node:events:497
+      throw er; // Unhandled 'error' event
+      ^
+
 Error: listen EADDRINUSE: address already in use 127.0.0.1:3000
     at Server.setupListenHandle [as _listen2] (node:net:1941:16)
     at listenInCluster (node:net:1998:12)
@@ -147,13 +182,19 @@ Emitted 'error' event on Server instance at:
 Node.js v22.23.2
 ```
 
+The first four lines are Node's unhandled-`'error'` preamble rather than
+anything this module wrote: the runtime source position, the `throw er;`
+statement that rethrows the unhandled event, a caret marking the column it was
+thrown from, and a blank line. The failure proper begins on the fifth line, at
+`Error: listen EADDRINUSE`.
+
 It then exits with `exit code: 1`. The final `{ ... }` block is the error
 object, and it is the most useful part: it names the code, the syscall, and the
 exact address and port that could not be bound.
 
-The second instance exited with status 1. Stack-frame line numbers and the
-trailing version line follow your runtime; the `code`, `errno`, `syscall`,
-`address` and `port` fields are the stable part.
+The second instance exited with status 1. The `node:events:NNN` header, the
+stack-frame line numbers and the trailing version line follow your runtime; the
+`code`, `errno`, `syscall`, `address` and `port` fields are the stable part.
 
 The stack trace is unhandled because the module registers no `error` handler on
 the server; the `listen()` call at `server.js:L12` fails and the process exits.
@@ -162,8 +203,8 @@ Match on `code` rather than on `errno`: `errno` is platform-specific and was
 `-98` on the Linux host this was captured on, while `code` is `'EADDRINUSE'`
 everywhere.
 
-The missing banner is the signal worth remembering: if that first line never
-appears, the socket was never bound, whatever else the terminal shows.
+The missing banner is the signal worth remembering: if the banner line never
+appears on stdout, the socket was never bound, whatever else the terminal shows.
 
 ### Why the failure is fatal rather than recoverable
 
@@ -292,36 +333,37 @@ does not support. This version therefore inspects `err.code`, reports only
 sets a non-zero exit code so a script cannot mistake uncertainty for a clean
 result. The two-second timeout bounds the wait so it cannot hang.
 
-Three captured runs, one per branch. Service running:
+Three captured runs of that exact command, one per branch. With the service
+running it reports the port as in use, on standard output, exiting `0`:
 
 ```text
-COMMAND    PID USER FD   TYPE  DEVICE SIZE/OFF NODE NAME
-node    563083 root 21u  IPv4 1422210      0t0  TCP 127.0.0.1:3000 (LISTEN)
+port 3000 on 127.0.0.1: IN USE
 ```
 
-The PID, user and device numbers are specific to that run; the shape of the line
-is what to expect. `ss` is an equivalent where it is installed:
-
-```bash
-ss -ltnp | grep ':3000'
-```
+With nothing listening, `ECONNREFUSED` is reported as free — also on standard
+output, also exiting `0`:
 
 ```text
-LISTEN 0      511        127.0.0.1:3000      0.0.0.0:*    users:(("node",pid=563083,fd=21))
+port 3000 on 127.0.0.1: FREE (connection refused)
 ```
 
-On Windows the equivalent listing is the following `cmd.exe` command, shown
-without output because it cannot be executed on the Linux host these transcripts
-came from. Read the PID from the right-hand column:
+The third branch needs a connection that neither completes nor is refused, so
+this run was captured with packets to `127.0.0.1:3000` dropped by a local
+firewall rule; the command itself was run unmodified. This branch writes to
+**standard error** and exits **2**:
 
 ```text
-netstat -ano | findstr :3000
+port 3000 on 127.0.0.1: INCONCLUSIVE (connect timed out after 2000 ms)
 ```
 
-None of `lsof`, `ss` and `netstat` is guaranteed to be installed — minimal
-container images frequently ship without all three. This check needs nothing but
-Node, and it reports the outcomes distinctly instead of collapsing them into one
-answer:
+So `2` is the code to branch on in a script: `0` means the probe reached a
+conclusion and printed it on standard output, and `2` means it did not reach
+one at all.
+
+A shorter one-liner covers the same ground when you would rather read the
+outcome from the exit code than from the printed line. It is the form the
+exit-code table below documents, and it distinguishes *free* from *in use* by
+status as well as by message:
 
 ```bash
 node -e "const s=require('net').connect(3000,'127.0.0.1');s.on('connect',()=>{console.log('127.0.0.1:3000 is accepting connections');s.end();process.exit(0);});s.on('error',e=>{if(e.code==='ECONNREFUSED'){console.log('127.0.0.1:3000 refused the connection: nothing is listening');process.exit(1);}console.log('127.0.0.1:3000 is not accepting connections: '+e.code);process.exit(2);});"

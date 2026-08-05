@@ -121,7 +121,9 @@ started while the first still held the port:
 Error: listen EADDRINUSE: address already in use 127.0.0.1:3000
 ```
 
-The stack frames that sit between that line and the block below are omitted here
+Three parts of the real output are left out: the four-line unhandled-`'error'`
+preamble Node prints ahead of that line, the stack frames between it and the
+block below, and the trailing version line at the very end. Each is omitted
 because [../guides/troubleshooting.md](../guides/troubleshooting.md) owns the
 complete transcript. The error object carries the specifics, and the two values
 it names are exactly the two constants documented on this page:
@@ -210,16 +212,18 @@ print `8080`: the transcript above was captured from a copy whose `port`
 constant had been changed exactly as this procedure describes.
 
 The service now answers there and nowhere else. Captured against the edited
-file:
+file, using the same five flags [installation.md](installation.md) tabulates —
+`--silent` removes the progress meter and `--show-error` keeps any diagnostic,
+so the block below is the whole of what the command printed:
 
 ```bash
-curl -i --noproxy '*' --max-time 5 http://127.0.0.1:8080/
+curl --noproxy '*' --include --silent --show-error --max-time 5 http://127.0.0.1:8080/
 ```
 
 ```http
 HTTP/1.1 200 OK
 Content-Type: text/plain
-Date: Tue, 04 Aug 2026 20:22:56 GMT
+Date: Wed, 05 Aug 2026 01:00:04 GMT
 Connection: keep-alive
 Keep-Alive: timeout=5
 Content-Length: 14
@@ -264,11 +268,15 @@ curl --noproxy '*' --include --silent --show-error --max-time 5 http://127.0.0.1
 ```
 
 ```text
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Could not connect to server
 curl exit code: 7
 ```
 
-`curl` printed no response line at all before that, because exit code 7 is
-"failed to connect". Meanwhile `127.0.0.1:3000` answered normally throughout:
+The diagnostic line comes first because `--show-error` keeps it even under
+`--silent`, and `curl` writes it before the shell reaches `echo`. Above it there
+is no status line and no header block at all: exit code 7 is "failed to
+connect", so no response was ever received to print. Meanwhile `127.0.0.1:3000`
+answered normally throughout:
 
 ```bash
 curl --noproxy '*' --silent --show-error --max-time 5 http://127.0.0.1:3000/; echo "curl exit code: $?"
@@ -291,15 +299,27 @@ there are `$env:PORT=8080; node server.js` in PowerShell and
 same reason: the value is set, and then nothing reads it.
 
 The variable was set and had no effect whatsoever: the banner reports `3000`.
-Running the portable port check from
-[../guides/troubleshooting.md](../guides/troubleshooting.md) alongside that
-process confirms where the listener actually is, rather than taking the
-banner's word for it:
+Reading the kernel's own socket table settles where the listener actually is,
+rather than taking the banner's word for it. The filter names both ports, so a
+row for either one would appear:
+
+```bash
+ss -ltn '( sport = :3000 or sport = :8080 )'
+```
 
 ```text
-port 3000 is in use
-port 8080 is free
+State  Recv-Q Send-Q Local Address:Port Peer Address:Port
+LISTEN 0      511        127.0.0.1:3000      0.0.0.0:*   
 ```
+
+One row came back, and it is `127.0.0.1:3000`. The requested `8080` is absent
+because nothing ever bound it — the same conclusion the failed `curl` above
+reached from the other direction. `ss` is Linux-only. The portable equivalent
+probes by connecting instead of by reading the socket table, and it is the port
+check owned by [../guides/troubleshooting.md](../guides/troubleshooting.md);
+that probe hardcodes `127.0.0.1:3000` and accepts no port argument, so it
+answers the 3000 half only, reporting `port 3000 on 127.0.0.1: IN USE` against
+this same process.
 
 Nothing is half-configured either — the default port kept answering normally
 throughout. The variable is simply not consumed by anything.
