@@ -286,6 +286,64 @@ PDF 1.7 that stores its page objects in compressed object streams, so the count
 cannot be confirmed without decompressing it, and an unverified number has no
 place here.
 
+### What sample.doc carries besides its format
+
+A binary fixture is opaque in a diff, which makes it the one kind of file in this
+repository whose contents nobody reviews. `sample.doc` is not empty padding: it
+is a real authored document, and it carries document metadata of its own.
+Recording that here is the point of this section, because "98 KB of legacy Word
+container" describes the wrapper and says nothing about what is inside it.
+
+**What the file is.** Its title string identifies it as the IEEE conference-paper
+template, "Template for Preparation of Papers for IEEE Sponsored Conferences &
+Symposia" — a template published for authors to copy, which is what makes it a
+convenient, widely mirrored sample of the legacy format.
+
+**What it carries.** Two kinds of embedded string are worth naming, because a
+reader who assumes a fixture is anonymous would be wrong:
+
+| Embedded content | Observed values | Reading |
+| --- | --- | --- |
+| Word's own authorship and template metadata, in the OLE2 property streams | `yanqing`, `SYYANQING`, and the template paths `C:\Yanqing\IEEE VES 2007\Sample doc paper.dot` and `C:\Yanqing\IEEE VES 2007\doc Template.doc`, alongside a printer name, `HP LaserJet 4200 PCL 6` | A username, and a directory layout from the machine the template was last saved on. No credential, token, or key appears |
+| Contact details in the body text | Three e-mail addresses, each with the literal local part `author` — `author@ boulder.nist.gov`, `author@lamar. colostate.edu`, `author@nrim.go.jp` — with telephone and fax numbers of the form `303-555-5555` | The template's own worked example of an author footnote. The `author` local part and the reserved `555` number range are both placeholder conventions, so these are illustrative rather than anyone's real contact details |
+
+Both readings were established by reading the file, never by editing it. The
+authorship strings are stored as UTF-16LE, so a plain `strings` pass does not show
+them; `strings -e l -n 4 sample.doc` does on Linux and macOS, and this equivalent
+needs nothing but Node, so it works on Windows too:
+
+```bash
+node -e "const b=require('fs').readFileSync('sample.doc');const found=new Set();for(const off of [0,1]){let cur='';for(let i=off;i+1<b.length;i+=2){const c=b[i];if(b[i+1]===0&&c>=32&&c<127){cur+=String.fromCharCode(c);}else{if(cur.length>3)found.add(cur);cur='';}}}console.log([...found].filter(s=>/yanqing/i.test(s)).sort().join('\n'));"
+```
+
+Captured output:
+
+```text
+-C:\Yanqing\IEEE VES 2007\Sample doc paper.dot
+SYYANQING
+yanqing
+yanqing)C:\Yanqing\IEEE VES 2007\doc Template.doc
+```
+
+The leading `-` and the `)` in that output are neighbouring bytes of the property
+stream rather than part of the values; the command deliberately prints what it
+found without tidying it.
+
+**Redistribution, and why the file is still preserved as-is.** The document is a
+template that was published for authors to copy and adapt, and it is redistributed
+here unmodified as a format fixture — no part of it is presented as this project's
+own work. The metadata above is a username and a directory layout, not a secret,
+and the contact details are the template's placeholders. That is a disclosure, not
+a clearance: **if the owner of this repository concludes that redistributing the
+file with those strings intact is not acceptable, the remedy is to replace the
+fixture with a sanitised or freshly generated equivalent, under explicit
+authorisation.** It is not to edit this one in place. Every fixture here is
+protected by the [Preservation policy](#preservation-policy) precisely because its
+exact bytes are what it exists to provide, and a sanitising edit would change the
+bytes of a file that other work may already depend on. Nothing in this
+documentation pass modified it: the byte count above and the format string were
+read from the file, and its checksum is unchanged.
+
 ### The size convention, and why `du` disagrees
 
 The **Decimal** column above uses decimal units throughout, which is the

@@ -49,7 +49,8 @@ deterministic as before.
 ## Overview
 
 `server.js` creates one HTTP server, binds it to the IPv4 loopback address on
-port 3000, and replies to every request it receives with `Hello, World!` as
+port 3000, and gives every request Node dispatches through the server's
+`request` event the same application-level reply: `Hello, World!` as
 `text/plain`. That is the entire feature set, and the following properties are
 worth knowing before you read a single line of it.
 
@@ -80,33 +81,40 @@ owns it. Edit both copies together.
 
 ```mermaid
 flowchart LR
-    C["HTTP client<br/>curl, browser, script"]
-    subgraph HOST["Local machine only"]
+    subgraph HOST["One host - nothing outside it can reach the listener"]
+        C["HTTP client on this same host<br/>curl, browser, script"]
         subgraph PROC["Single Node.js process: node server.js"]
             L["http.Server bound to 127.0.0.1:3000<br/>server.js:L6, L12"]
             H["Request listener<br/>server.js:L6-L10"]
             L --> H
         end
+        C -->|"ordinary request, any path"| L
+        H -->|"200 text/plain Hello, World!"| C
     end
-    C -->|"ordinary request, any path"| L
-    H -->|"200 text/plain Hello, World!"| C
-%% One process, one listener, one client. No database, cache, queue,
-%% load balancer or second service exists in this system.
+%% One process, one listener, one client, and the client is inside the host
+%% boundary because the loopback binding at server.js:L3 admits no off-host
+%% connection. No database, cache, queue, load balancer or second service
+%% exists in this system.
 ```
 
 The design is a single process with a single responsibility. Node's event loop
 accepts connections and dispatches each request to one listener function; there
-is no worker pool, no cluster, and no shared state, so nothing has to be
-synchronised. Every response is composed from constants in the source, which is
-what makes the service stateless: two requests that arrive a week apart get the
-same answer, and restarting the process loses nothing.
+is no application worker pool, no cluster, and no shared application state, so
+nothing in the listener has to be synchronised. Node still holds per-connection
+runtime resources such as sockets, parser buffers, and unread request bodies;
+[docs/architecture/overview.md](docs/architecture/overview.md#application-state-versus-runtime-state)
+owns that distinction. Every application-level reply is composed from constants
+in the source, which is what makes the service stateless: two ordinary requests
+that arrive a week apart get the same answer, and restarting the process loses
+nothing.
 
 The startup path is equally short. Requiring `http`, reading two configuration
-constants, constructing the server, and binding the socket all happen in one
-pass through the file, after which the process sits idle in the event loop
-waiting for connections. Everything that happens afterwards is driven by
-events — a connection arriving, a request being parsed, a response being
-flushed. For the diagrams that break those two paths down step by step, see
+constants, constructing the server, and calling `server.listen()` all happen in
+one pass through the file. The call returns immediately; Node completes the bind
+and emits the `listening` event afterwards, then the process waits for
+connections. Everything after the call is event-driven — the bind completing, a
+connection arriving, a request being parsed, a response being flushed. For the
+diagrams that break those two paths down step by step, see
 [docs/architecture/overview.md](docs/architecture/overview.md) and
 [docs/architecture/request-lifecycle.md](docs/architecture/request-lifecycle.md).
 
@@ -289,7 +297,7 @@ path-scoped nor method-scoped. Base URL: `http://127.0.0.1:3000`.
 | Path | Any, including `/` and arbitrary depth | The listener never reads `req.url` |
 | Query string | Ignored | Never read |
 | Request headers | Ignored | Never read |
-| Request body | Ignored, and never consumed | The request stream is not read |
+| Request body | Ignored by the application | The request stream is not read by this module. Node still receives an announced body and discards it after the reply finishes, so an ignored upload costs bandwidth and holds its connection — see [docs/api/http-api.md](docs/api/http-api.md#what-happens-to-a-body-nobody-reads) |
 
 ### Response specification
 
@@ -330,19 +338,31 @@ sequenceDiagram
     participant C as HTTP client
     participant S as http.Server (server.js:L6)
     participant R as http.ServerResponse
-    C->>S: Request dispatched through the request event (ANY method, ANY path)
+    Note over C,R: Scope - one ordinary request, meaning one Node dispatches<br/>to the listener through the request event. Any path, and<br/>any method other than HEAD.
+    C->>S: Ordinary request (any path, any method other than HEAD)
     Note over S: req is never inspected
     S->>R: statusCode = 200 (L7)
     S->>R: setHeader Content-Type text/plain (L8)
     S->>R: end 'Hello, World!\n' (L9)
-    R-->>C: 200 OK, 14 bytes
-%% This sequence applies only to requests Node dispatches through the request
-%% event, and every such request produces this exact exchange whatever its
-%% method and path. Requests Node does not dispatch through that event do not
-%% follow it at all: CONNECT goes to the connect event and is answered with
-%% nothing, and an unsupported Expect header is answered 417 by Node itself.
-%% A HEAD request does run the listener, but Node suppresses the body, so the
-%% client receives the head only.
+    R-->>C: 200 OK, Content-Type text/plain, 14-byte body
+    Note over C,R: HEAD runs L7-L9 unchanged, then Node suppresses the body,<br/>so the client receives the head only with no Content-Length.<br/>CONNECT, 400, 431 and 417 never reach the listener at all.
+%% The scope notes are load-bearing, not pedantic:
+%% * The three listener steps L7-L9 run identically for every request Node
+%%   dispatches through the request event, whatever its method and path. That
+%%   application-level invariance is what the diagram exists to show.
+%% * HEAD is dispatched and does run those same three steps, but Node then
+%%   discards the payload and frames no Content-Length, so the final arrow does
+%%   not describe what a HEAD client receives.
+%% * Some requests never reach the listener, so no part of this sequence applies
+%%   to them: CONNECT goes to the connect event and is answered with nothing, an
+%%   HTTP/1.1 request whose Expect header Node does not honour is answered 417 by
+%%   Node, and a malformed request line or an oversized header block is answered
+%%   400 or 431 by Node's parser.
+%% * Framing around the reply varies with the request. An HTTP/1.0 request is
+%%   answered close-delimited, with Connection: close and no Content-Length,
+%%   though the body is still the same 14 bytes.
+%% Full treatment: the request-matching matrix, the exception table and the
+%% framing table in docs/api/http-api.md, which owns this diagram.
 ```
 
 ### Worked examples
@@ -588,14 +608,33 @@ is in
 those tools is installed, this check needs nothing but Node:
 
 ```bash
-node -e "const s=require('net').connect(3000,'127.0.0.1');s.on('connect',()=>{console.log('port 3000 on 127.0.0.1 is in use');s.end();});s.on('error',()=>console.log('port 3000 on 127.0.0.1 is free'));"
+node -e "const s=require('net').connect(3000,'127.0.0.1');s.setTimeout(2000,()=>{console.error('port 3000 on 127.0.0.1: inconclusive (timed out after 2000 ms)');s.destroy();process.exit(2);});s.on('connect',()=>{console.log('port 3000 on 127.0.0.1 is in use');s.end();process.exit(0);});s.on('error',e=>{if(e.code==='ECONNREFUSED'){console.log('port 3000 on 127.0.0.1 is free');process.exit(1);}console.error('port 3000 on 127.0.0.1: inconclusive ('+e.code+')');process.exit(2);});"
 ```
 
-Captured output while the service was running:
+Captured output while the service was running, exiting `0`:
 
 ```text
 port 3000 on 127.0.0.1 is in use
 ```
+
+Captured with nothing listening, exiting `1`:
+
+```text
+port 3000 on 127.0.0.1 is free
+```
+
+Only `ECONNREFUSED` is reported as free, and only that. Any other failure — a
+permission denial, an unreachable route, or the 2 000 ms deadline expiring because
+packets are being dropped rather than refused — goes to standard error as
+*inconclusive* and exits `2`, because none of those tells you whether the port is
+bound. Captured with packets to `127.0.0.1:3000` dropped by a local firewall rule:
+
+```text
+port 3000 on 127.0.0.1: inconclusive (timed out after 2000 ms)
+```
+
+The deadline is what makes the check usable: without it, a filtered port leaves
+the probe waiting on the operating system's own connect timeout.
 
 The full symptom-to-remedy matrix, with a decision tree, is in
 [docs/guides/troubleshooting.md](docs/guides/troubleshooting.md).
@@ -617,7 +656,9 @@ The repository is a flat tree plus the documentation directory this pass added:
 ├── CONTRIBUTING.md            Documentation authoring workflow
 ├── README.md                  This file
 ├── docs/                      Documentation corpus (11 pages)
-├── tools/                     Documentation gate scripts
+├── tools/                     Documentation gate scripts, plus the
+│                              docs-md/ manifest and lockfile for the
+│                              optional Markdown renderer
 ├── LoginTest.java             Fixture: intentionally non-compilable
 ├── industry.csv               Fixture: 44 lines, 1 header + 43 labels
 ├── test.txt.txt               Fixture: 0 bytes, intentionally empty

@@ -261,13 +261,20 @@ registered on the server. `Source: server.js:L6-L10`
 
 | Parameter | Type | Notes |
 | --- | --- | --- |
-| `req` | `http.IncomingMessage` | The inbound request. **Never read.** No property of it is inspected anywhere in the handler — not `method`, not `url`, not `headers` — and the body stream is never consumed |
+| `req` | `http.IncomingMessage` | The inbound request. **Never read by application logic.** No property of it is inspected anywhere in the handler — not `method`, not `url`, not `headers` — and the body stream is never read here either. The runtime still receives an unread body and discards it after the reply finishes |
 | `res` | `http.ServerResponse` | The outbound response stream the reply is composed on. Mutated in place |
 
 The `req` parameter is documented as received-but-unread rather than as an input
 to any logic, and that is a verified property of the source rather than a
 simplification: the handler body contains no read of `req` at all.
 `Source: server.js:L6-L10`
+
+"Unread" is scoped to application code on purpose. It does not mean the request
+body never arrives: Node receives it, buffers it, and throws away whatever the
+application left unread once the response has finished, so an ignored upload still
+costs bandwidth and still holds its connection open while it arrives. The measured
+demonstration is owned by
+[http-api.md](http-api.md#what-happens-to-a-body-nobody-reads).
 
 That single omission is what produces the *catch-all response*. With nothing
 read from the request, no code exists that could branch on a method, a path, a
@@ -514,45 +521,64 @@ the generated text against this page when checking for drift, and nothing in
 the corpus requires it: this page is authored and committed, and neither
 documentation gate invokes the script.
 
-### The supply-chain trade-off in docs:md
+### Where each generator comes from
 
-Where the two generators come from differs, and that difference is a security
-property rather than a packaging detail. `docs:api` runs `jsdoc`, a declared
-devDependency resolved through `package-lock.json`, so every package it loads
-is pinned to an exact version and checked against a recorded integrity hash.
-`docs:md` instead fetches its generator at run time:
+The two generators are resolved differently, and that difference is a security
+property rather than a packaging detail. Both are reproducible, and neither
+downloads an unpinned closure of third-party code.
 
-```bash
-npx --yes --ignore-scripts jsdoc-to-markdown@9.1.3 --files server.js
+`docs:api` runs `jsdoc`, a devDependency of the root manifest resolved through the
+root `package-lock.json`, so every package it loads is pinned to an exact version
+and checked against a recorded integrity hash.
+
+`docs:md` runs the same way, from its own manifest. The renderer is **not** a root
+devDependency — it is optional tooling, so the root toolchain stays at three
+required packages — but it is not resolved ad hoc either. It has a dedicated,
+committed manifest and lockfile of its own:
+
+```text
+tools/docs-md/package.json        devDependencies: jsdoc-to-markdown 9.1.3
+tools/docs-md/package-lock.json   lockfileVersion 3, 82 packages, all pinned
 ```
 
-Three consequences follow, and together they are why the script stays optional:
+The script installs from that lockfile and then runs the local binary:
 
-- **The pin is shallow.** `@9.1.3` fixes the top-level package and nothing
-  below it. `npx` resolves that package's transitive dependencies against the
-  registry on any machine that has not cached them, with no lockfile and no
-  integrity pinning, so two runs on different days can execute a different
-  closure of third-party code (CWE-494). `docs:api` cannot drift that way.
-- **It reaches the network and then executes what arrives.** Unlike `docs:api`,
-  the first run on a machine downloads code rather than relying on a prior
-  `npm install`, and that code then runs locally. `--ignore-scripts` is
-  load-bearing: it stops the fetched packages' lifecycle scripts from running
-  during resolution. It does not sandbox the generator itself, which still
-  executes with the privileges of whoever invoked it.
-- **So treat it as a manual, disposable-environment tool.** Run it when you
-  actually want a fresh rendering — in a container or a throwaway workspace,
-  under an unprivileged account, never as `root`, and never inside an automated
-  gate. `docs:lint`, `docs:links` and `docs:check` never call it.
+```bash
+npm ci --ignore-scripts --prefix tools/docs-md
+node tools/docs-md/node_modules/.bin/jsdoc2md --files server.js
+```
 
-To make the rendering reproducible, lock the generator outside this repository
-rather than declaring it inside: in a throwaway directory run `npm init -y`,
-then `npm install --save-exact --ignore-scripts jsdoc-to-markdown@9.1.3`, which
-writes a lockfile carrying an integrity hash for every package in the closure,
-and run the local binary from there against this repository's `server.js`.
+Four properties follow, and together they are why the renderer is safe to invoke
+from a trusted npm script at all:
 
-Keeping the generator undeclared here is deliberate. It is optional tooling, so
-it stays out of `devDependencies` and out of the lockfile, and the three
-declared devDependencies remain the whole of the required toolchain.
+- **The pin is deep, not shallow.** `npm ci` installs exactly what the committed
+  lockfile names and nothing else: all 82 packages are pinned to an exact version,
+  every one carries an integrity hash, and every one resolves to a
+  `registry.npmjs.org` tarball. Two runs months apart execute the identical
+  closure, which is what a bare `jsdoc-to-markdown@9.1.3` fetch could never
+  promise — that pin fixes the top-level package only and leaves its transitive
+  dependencies to be resolved fresh (CWE-494).
+- **The one deliberately mutable range in the package is never resolved.**
+  `jsdoc-to-markdown` declares `@75lb/nature: latest` as a peer dependency, and
+  a `latest` range is by definition whatever the registry serves today. It is
+  marked optional, so `npm ci` does not install it: the lockfile holds no entry
+  for it, and nothing here resolves `latest` at any point.
+- **Nothing executes during installation.** `--ignore-scripts` blocks lifecycle
+  scripts, and the lockfile independently records that not one of the 82 packages
+  declares an install script, so there is nothing for that flag to have to block.
+  The generator itself still runs with the privileges of whoever invokes it — that
+  is true of any local tool, including `jsdoc`.
+- **It stays optional and out of every gate.** `docs:lint`, `docs:links` and
+  `docs:check` never call it, and neither does `docs:api`. Nothing in the corpus
+  depends on its output: this page is authored and committed, and the renderer
+  exists only to compare a fresh rendering against it when checking for drift.
+
+The install needs registry access or an npm cache that already contains every
+locked tarball. Later runs can reuse that cache, but `npm ci` still removes and
+rebuilds `tools/docs-md/node_modules`; the command does not promise to avoid every
+registry check. If you would rather not install into the repository at all, run
+the same two commands inside a container: the lockfile is what makes the result
+identical either way.
 
 ## See also
 

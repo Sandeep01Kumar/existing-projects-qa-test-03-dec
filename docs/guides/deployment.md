@@ -364,22 +364,20 @@ flowchart LR
     C2 -->|"reaches the proxy on a routable interface, HTTPS if configured"| RP
     RP -->|"forwards to 127.0.0.1:3000"| L
     LP -->|"direct to 127.0.0.1:3000 - BYPASSES the proxy entirely"| L
-%% The Reverse proxy node is a RECOMMENDED ADDITION only. It does not exist in
-%% this repository: no proxy configuration file is created by this change, and
-%% no proxy is deployed. It restricts REMOTE callers only, and it supplies
-%% nothing until you explicitly configure it - the guarantee comes from the
-%% loopback bind, not from the proxy, so local processes still reach the service
-%% directly and the proxy's TLS, authentication, rate limits and logs never see
-%% them. Every other node here is a component that provably exists - the single
-%% node server.js process, its loopback listener, and the local callers that can
-%% reach it. Nothing else is drawn because nothing else exists: no database, no
-%% cache, no queue, no load balancer and no second service.
-%% The remote attempt never reaches the listener whatever the network path, but
-%% the shape of the failure varies with it: an immediate refusal where the packet
-%% reaches the host, or a timeout or silent drop where a firewall or NAT sits in
+%% What each node is. The repository's own components are the single node
+%% server.js process and its loopback listener. The three caller nodes - local
+%% client, remote client, and any other local user or process - are external
+%% actors, not parts of this system. The Reverse proxy is recommended
+%% infrastructure the repository does not contain: no proxy configuration lives
+%% in this tree and no proxy is deployed. Nothing else is drawn because nothing
+%% else exists - no database, cache, queue, load balancer or second service.
+%% Two constraints the edges cannot carry on their own. The reachability
+%% guarantee comes from the loopback binding at server.js:L3 and not from the
+%% proxy, which is why the bypass edge exists at all and why adding a proxy
+%% cannot close it. And a remote caller never reaches the listener whatever the
+%% path between them, though the failure takes different shapes: a refusal where
+%% the packet reaches the host, a drop or timeout where a firewall or NAT sits in
 %% between.
-%% Both listener labels carry the source lines that fix the bind address and the
-%% port, and the refused remote edge carries the verified curl exit code.
 ```
 
 Reading the diagram: the solid edge from the local client is the verified
@@ -547,22 +545,23 @@ have to be done before this service belonged on an untrusted network. Each
 | TLS / HTTPS | No | The server is a plain `http.Server`; the module requires only core `http`, never `https` or `tls`. `Source: server.js:L1`, `Source: server.js:L6` |
 | Authentication | No | The *request listener* never reads `req`, so no credential, header or token is ever examined. `Source: server.js:L6-L10` |
 | Authorization | No | No identity is established and the handler contains no conditional logic, so there is nothing to authorise against. `Source: server.js:L6-L10` |
-| Rate limiting | No | No counter, timer or connection accounting exists; every request is answered immediately. `Source: server.js:L6-L10` |
+| Rate limiting | No | No application counter, quota or per-caller accounting exists; every request Node dispatches to the listener is answered immediately, while aggregate volume is bounded only by the host and Node's per-connection defaults. `Source: server.js:L6-L10` |
 | Request routing | No | `req.url` and `req.method` are never read, so every request that reaches the *request listener* receives the same *catch-all response*, including on paths that look like private APIs. The exact contract, and the requests Node answers before the listener, are owned by [../api/http-api.md](../api/http-api.md). `Source: server.js:L6-L10` |
 | Input validation | No | Nothing is read from the request, so nothing is validated. `Source: server.js:L6-L10` |
 | Structured logging | No | The only output the process ever writes is the single `console.log` startup banner. No request is logged, in any format. `Source: server.js:L13` |
 | Health-check endpoint | No | No path is distinguished from any other, so no dedicated liveness or readiness route exists. `Source: server.js:L6-L10` |
-| Error-handling middleware | No | There is no `try`/`catch`, no **application-defined** `4xx` or `5xx` branch, and no `'error'` listener on the server, so a listener exception would be unhandled. Node still generates its own protocol errors — a malformed request gets `400`, an oversized header block `431`, an unsupported `Expect` header `417` — which no code here chooses or can suppress; see [Error responses](../api/http-api.md#no-application-defined-error-responses). `Source: server.js:L6-L10`, `Source: server.js:L12` |
+| Error-handling middleware | No | There is no `try`/`catch`, no **application-defined** `4xx` or `5xx` branch, and no `'error'` listener on the server, so a listener exception would be unhandled. Node still generates its own protocol errors — a malformed request or an HTTP/1.1 request with no `Host` gets `400`, an oversized header block `431`, a header block or an announced body that does not arrive in time `408`, an oversized chunk extension `413`, an unsupported `Expect` header `417` — which no code here chooses or can suppress; see [Error responses](../api/http-api.md#no-application-defined-error-responses). `Source: server.js:L6-L10`, `Source: server.js:L12` |
 | Graceful shutdown | No | No `SIGINT` or `SIGTERM` handler and no `server.close()` call exists anywhere in the module, so connections are dropped on termination. `Source: server.js:L12-L14` |
 | Security headers | No | Nothing sets `Strict-Transport-Security`, `X-Content-Type-Options` or any similar hardening header; the only header the module sets is `Content-Type`. `Source: server.js:L8` |
-| Timeouts and body limits | No | The module configures neither, so Node's defaults apply unchanged and nothing bounds a slow or oversized request. `Source: server.js:L1-L14` |
+| Application timeouts, body limits and quotas | No | The module configures none, so the only bounds in force are Node's own per-connection defaults — `headersTimeout`, `requestTimeout`, `keepAliveTimeout`, `maxHeaderSize` and a chunk-extension limit, all runtime- and version-dependent and tabulated by [../api/http-api.md](../api/http-api.md#runtime-bounds-that-do-apply). Those stop *one* slow client from holding a socket indefinitely. What is missing is application policy and aggregate protection: no body-size check, no rate limit, no per-caller accounting, no connection cap (`maxConnections` unset, `maxRequestsPerSocket` `0`), so many slow or incomplete clients are refused nothing. `Source: server.js:L1-L14` |
 
 Two of those rows combine into a consequence worth spelling out, because it
-defeats the obvious workaround. Since every path returns `200`, an HTTP health
-probe cannot distinguish a healthy service from any other condition: it proves
-only that *a* process is listening on the port. It cannot establish that the
-process is this service, and there is no degraded state it could ever report,
-because no code path produces one.
+defeats the obvious workaround. Since every ordinary path Node dispatches to the
+listener returns the same application-level `200`, an HTTP health probe cannot
+distinguish a healthy service from any other condition: it proves only that *a*
+process is listening on the port. It cannot establish that the process is this
+service, and there is no degraded state it could ever report, because no
+application code path produces one.
 
 Each of these is a **deliberate exclusion of the current design** rather than
 an oversight, and the technical specification corroborates every one of them

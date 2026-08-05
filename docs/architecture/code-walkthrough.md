@@ -90,17 +90,17 @@ grep -nvE '^\s*(\*|/\*|//|$)' server.js
 ```
 
 ```text
-201:const http = require('http'); // Loads Node's built-in HTTP module; a core module, so no npm install is involved.
-220:const hostname = '127.0.0.1'; // The IPv4 loopback literal; scopes reachability to this machine only.
-236:const port = 3000; // The TCP port the listener will bind.
-261:const server = http.createServer((req, res) => { // Instantiates an http.Server and registers the per-request listener.
-262:  res.statusCode = 200; // Sets the status line; must precede any body byte written.
-263:  res.setHeader('Content-Type', 'text/plain'); // Declares the payload MIME type; must precede res.end.
-264:  res.end('Hello, World!\n'); // Supplies the 14-byte body and terminates the response, flushing the implicit head; for a HEAD, Node discards that body.
-265:}); // Closes the request-listener body and the createServer invocation.
-267:server.listen(port, hostname, () => { // Binds the socket and begins accepting connections; async, fires on 'listening'.
-269:  console.log(`Server running at http://${hostname}:${port}/`);
-270:}); // Closes the startup callback and the listen invocation.
+230:const http = require('http'); // Loads Node's built-in HTTP module; a core module, so no npm install is involved.
+249:const hostname = '127.0.0.1'; // The IPv4 loopback literal; scopes reachability to this machine only.
+265:const port = 3000; // The TCP port the listener will bind.
+290:const server = http.createServer((req, res) => { // Instantiates an http.Server and registers the request listener invoked once per request.
+291:  res.statusCode = 200; // Sets the status line; must precede any body byte written.
+292:  res.setHeader('Content-Type', 'text/plain'); // Declares the payload MIME type; must precede res.end.
+293:  res.end('Hello, World!\n'); // Supplies the 14-byte body and terminates the response, flushing the implicit head; for a HEAD, Node discards that body.
+294:}); // Closes the request-listener body and the createServer invocation.
+296:server.listen(port, hostname, () => { // Binds the socket and begins accepting connections; async, fires on 'listening'.
+298:  console.log(`Server running at http://${hostname}:${port}/`);
+299:}); // Closes the startup callback and the listen invocation.
 ```
 
 Eleven lines, at eleven physical positions that no longer match their
@@ -226,10 +226,28 @@ is not a line-level mandate.
 Note what is absent from this block: any read of `req`. Method, path, query
 string, headers and body are all ignored, and that single omission is the whole
 origin of the *catch-all response* — with nothing read from the request, no code
-exists that could branch on a path or a method. The per-step treatment of L7 to
+exists that could branch on a path or a method. Every request Node dispatches
+through the `request` event therefore receives the same **application-level**
+reply: the same status, the same one header this module sets and the same body.
+That is not a promise about every byte on the wire, and it says nothing about
+requests the runtime answers before the listener runs — both belong to the
+contract owner. The per-step treatment of L7 to
 L9 in the context of one request is owned by
 [request-lifecycle.md](request-lifecycle.md), and the response contract those
 three lines produce is owned by [../api/http-api.md](../api/http-api.md).
+
+The precision matters, so state what the runtime does above these five lines.
+There are three ways, and this is not an exhaustive account of the runtime. A
+`HEAD` request runs L7-L9 unchanged but has its body suppressed afterwards.
+Several request shapes never reach the listener at all, so no line of this block
+executes for them — `CONNECT`, a malformed request line, an HTTP/1.1 request with
+no `Host` header, an oversized header block, a header block that never arrives,
+and an unsupported `Expect` header among them. And a request whose body is still
+arriving after this block has answered can breach a runtime limit afterwards, in
+which case Node appends its own `408` or `413` to the connection **after** the
+reply these lines composed. Those runtime exceptions are owned and tabulated in
+full by
+[../api/http-api.md](../api/http-api.md#requests-that-do-not-follow-this-contract).
 
 Captured from a running instance, which is what the three statements add up to
 on the wire:
@@ -276,23 +294,52 @@ the event loop. Node signals that moment by emitting the `'listening'` event,
 which is what invokes the *startup callback*. If the bind cannot succeed — port
 3000 already held by another process, for instance — the failure surfaces as an
 `error` event that this file registers no handler for, so the process exits
-without ever printing the banner. Remediation is owned by
+without ever printing the banner.
+
+The failure behaviour of this line is worth stating in two steps rather than one:
+
+1. **The general rule.** If the bind fails for any reason, the server emits an
+   `error` event. This module registers no `error` listener anywhere, so that
+   event goes unhandled, Node rethrows, and the process terminates with a stack
+   trace on stderr and a non-zero exit status. The banner is never printed. This
+   holds whatever the underlying cause — a port already held, a bind address that
+   does not exist on the host, a privileged port without the privilege.
+2. **The one routine instance.** In practice the cause is almost always a port
+   collision on `3000`, which surfaces as `EADDRINUSE`. That is a specific
+   example of the rule above, not the rule itself.
+
+Remediation is owned by
 [../guides/troubleshooting.md](../guides/troubleshooting.md).
 
 **L13** emits the human-readable readiness banner, interpolating `hostname` and
 `port` into a template literal. `Source: server.js:L13` It is the callback's
 entire body and its only effect: one line on stdout, with no health check, no
-validation and no return value. Captured from a background run that is stopped
-by the PID taken at spawn, with its log written outside the repository so no
-untracked file is left behind:
+validation and no return value. The captured run uses a private temporary
+directory and a self-cleaning subshell whose own job table identifies the child:
 
 ```bash
-node server.js > "${TMPDIR:-/tmp}/walkthrough.log" 2>&1 &
-server_pid=$!
-sleep 1
-cat "${TMPDIR:-/tmp}/walkthrough.log"
-kill "$server_pid"
-rm -f "${TMPDIR:-/tmp}/walkthrough.log"
+(
+  work="$(mktemp -d)" || exit 1
+  cleanup() {
+    if jobs %1 >/dev/null 2>&1; then
+      kill %1 2>/dev/null || true
+      wait %1 2>/dev/null || true
+    fi
+    rm -rf -- "$work"
+  }
+  trap cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  node server.js > "$work/walkthrough.log" 2>&1 &
+  sleep 1
+  if ! grep -q 'Server running at' "$work/walkthrough.log"; then
+    cat -- "$work/walkthrough.log"
+    wait %1
+    exit 1
+  fi
+  cat -- "$work/walkthrough.log"
+)
 ```
 
 ```text
@@ -318,8 +365,8 @@ rather than skipped.
 > exports object, having already started the server on the way. There is no
 > exported factory to call and no `require.main` guard that would defer the
 > bind. Importing *is* starting the server, so anything that needs this module's
-> behaviour must run it as a process — `node server.js` — rather than require
-> it.
+> behaviour must run it as a process — `node server.js` or the equivalent
+> `npm start` route — rather than require it.
 
 `require()` returning is not a readiness signal either, because L12 is
 asynchronous: at that instant the bind may still be in flight, and a request
@@ -333,42 +380,45 @@ One row per line, L1 through L14, with the blank lines and the closing braces
 included rather than exempted. The explanations are the fuller form of the
 inline comments in the source and say the same thing about the same line by
 design: the two are meant to be read interchangeably, so a change to either is a
-change to both.
+change to both. Every row carries its own citation, so the table is also the
+self-contained mapping every other `Source: server.js:Lnn` reference resolves
+against.
 
-| Line | Code | Explanation |
-| --- | --- | --- |
-| L1 | `const http = require('http');` | Loads Node's built-in HTTP module; a **core** module, so no `npm install` is involved |
-| L2 | *(blank)* | Separator between dependency acquisition and configuration |
-| L3 | `const hostname = '127.0.0.1';` | The IPv4 loopback literal; scopes reachability to this machine only |
-| L4 | `const port = 3000;` | The TCP port the listener will bind |
-| L5 | *(blank)* | Separator between configuration and server construction |
-| L6 | `const server = http.createServer((req, res) => {` | Instantiates an `http.Server` and registers the *request listener* invoked once per request |
-| L7 | `res.statusCode = 200;` | Sets the status line, which must happen **before any body byte** is written |
-| L8 | `res.setHeader('Content-Type', 'text/plain');` | Declares the payload MIME type; must precede `res.end()` |
-| L9 | `res.end('Hello, World!\n');` | Writes the 14-byte body and terminates the response, flushing the implicit head; for a `HEAD` request Node discards that body |
-| L10 | `});` | Closes the *request listener* body and the `createServer` invocation |
-| L11 | *(blank)* | Separator between server construction and socket binding |
-| L12 | `server.listen(port, hostname, () => {` | Binds the socket and begins accepting connections; asynchronous, the callback fires on `'listening'` |
-| L13 | ``console.log(`Server running at http://${hostname}:${port}/`);`` | Emits the human-readable readiness banner, interpolating `hostname` and `port` |
-| L14 | `});` | Closes the *startup callback* and the `listen` invocation |
+| Line | Code | Explanation | Citation |
+| --- | --- | --- | --- |
+| L1 | `const http = require('http');` | Loads Node's built-in HTTP module; a **core** module, so no `npm install` is involved | `Source: server.js:L1` |
+| L2 | *(blank)* | Separator between dependency acquisition and configuration | `Source: server.js:L2` |
+| L3 | `const hostname = '127.0.0.1';` | The IPv4 loopback literal; scopes reachability to this machine only | `Source: server.js:L3` |
+| L4 | `const port = 3000;` | The TCP port the listener will bind | `Source: server.js:L4` |
+| L5 | *(blank)* | Separator between configuration and server construction | `Source: server.js:L5` |
+| L6 | `const server = http.createServer((req, res) => {` | Instantiates an `http.Server` and registers the *request listener* invoked once per request | `Source: server.js:L6` |
+| L7 | `res.statusCode = 200;` | Sets the status line, which must happen **before any body byte** is written | `Source: server.js:L7` |
+| L8 | `res.setHeader('Content-Type', 'text/plain');` | Declares the payload MIME type; must precede `res.end()` | `Source: server.js:L8` |
+| L9 | `res.end('Hello, World!\n');` | Writes the 14-byte body and terminates the response, flushing the implicit head; for a `HEAD` request Node discards that body | `Source: server.js:L9` |
+| L10 | `});` | Closes the *request listener* body and the `createServer` invocation | `Source: server.js:L10` |
+| L11 | *(blank)* | Separator between server construction and socket binding | `Source: server.js:L11` |
+| L12 | `server.listen(port, hostname, () => {` | Binds the socket and begins accepting connections; asynchronous, the callback fires on `'listening'` | `Source: server.js:L12` |
+| L13 | ``console.log(`Server running at http://${hostname}:${port}/`);`` | Emits the human-readable readiness banner, interpolating `hostname` and `port` | `Source: server.js:L13` |
+| L14 | `});` | Closes the *startup callback* and the `listen` invocation | `Source: server.js:L14` |
 
 ## Line-to-symbol cross-reference
 
-Seven symbols carry documentation in `server.js`, and this table maps each line
-to the one that documents it. The names, kinds and types are exactly as
-[../api/server-module.md](../api/server-module.md) defines them: that page owns
-the seven-symbol inventory, and the full reference entries live there rather
-than being restated here.
+Seven symbols carry documentation in `server.js`, and every row below routes to
+their owner at
+[../api/server-module.md](../api/server-module.md#symbol-inventory). The `Kind`
+column uses that page's vocabulary, while the metadata column keeps the defaults,
+types, parameters, returns, and startup side effect visible without pretending
+this table replaces the full reference entries.
 
-| Line(s) | JSDoc symbol that documents it | Kind |
-| --- | --- | --- |
-| L1–L14 | The module as a whole, declared `@module server` and linkable as `module:server` | CommonJS module |
-| L1 | `http` | Constant, require binding — a Node core module, type `module:http` |
-| L3 | `hostname` | Constant, `{string}`, default `'127.0.0.1'` |
-| L4 | `port` | Constant, `{number}`, default `3000` |
-| L6 | `server` | Constant, `{http.Server}` |
-| L6–L10 | `@callback RequestHandler` — `@param {http.IncomingMessage} req`, `@param {http.ServerResponse} res`, `@returns {void}` | Callback typedef, namepath `module:server~RequestHandler` |
-| L12–L14 | `@callback ServerStartupCallback` — `@returns {void}`, documenting the stdout side effect | Callback typedef, namepath `module:server~ServerStartupCallback` |
+| Lines | Kind | Documented by | Type, default, and signature | Reference |
+| --- | --- | --- | --- | --- |
+| L1–L14 | CommonJS module | The module doc block: `@file`, `@module server`, `@description` | Namepath `module:server`; `@requires http`; exports nothing — no `module.exports` or `exports.*` assignment exists | [server-module.md](../api/server-module.md#module-server) |
+| L1 | Constant, require binding | `@constant http` | `@type {module:http}` — Node's built-in HTTP module, so nothing is installed to satisfy it | [server-module.md](../api/server-module.md#constant-http) |
+| L3 | Constant, string | `@constant hostname` | `@constant {string}`, `@default '127.0.0.1'` | [server-module.md](../api/server-module.md#constant-hostname) |
+| L4 | Constant, number | `@constant port` | `@constant {number}`, `@default 3000` | [server-module.md](../api/server-module.md#constant-port) |
+| L6 | Constant, `http.Server` | `@constant server` | `@constant {http.Server}`, `@type {http.Server}`; produced by `http.createServer([options][, requestListener])` | [server-module.md](../api/server-module.md#constant-server) |
+| L6–L10 | Callback typedef | `@callback RequestHandler` | `@param {http.IncomingMessage} req` (never read by application logic), `@param {http.ServerResponse} res` (mutated in place), `@returns {void}`; `@listens http.Server#event:request` | [server-module.md](../api/server-module.md#callback-requesthandler) |
+| L12–L14 | Callback typedef | `@callback ServerStartupCallback` | No parameters, `@returns {void}`; `@listens http.Server#event:listening`; its only effect is writing one line to stdout after a successful bind | [server-module.md](../api/server-module.md#callback-serverstartupcallback) |
 
 The last two rows are `@callback` typedefs rather than ordinary JSDoc blocks for
 a structural reason, not a stylistic one. Both functions are anonymous inline
@@ -379,12 +429,24 @@ name, describe its parameters and return value, and make that name usable as a
 type. Without it, the two most interesting functions in the module would be
 undocumentable.
 
-Two things the table cannot convey on its own. The first row and the L6 row both
-name `server` without colliding: one is the JSDoc module name declared in the
-file header, the other a constant declared inside it, and JSDoc distinguishes
-them by namepath. And **the three blank lines document no symbol at all** — L2,
-L5 and L11 are block boundaries rather than declarations, which is why they
-carry rows in the line-by-line table above but none here.
+Two of the attributions above are easy to get wrong, so state them outright:
+
+- **`@constant server` belongs to L6 alone.** Its declared source is the
+  `const server = ...` expression, `Source: server.js:L6`. L12 does not declare
+  it — L12 calls `.listen()` on the value L6 produced, which is a *use* of the
+  constant rather than a second declaration site. Pairing L12 with this symbol
+  would leave L12's own documenting symbol unaccounted for.
+- **L12 is documented by `@callback ServerStartupCallback`,** whose source range
+  is `server.js:L12-L14` — the `server.listen(...)` call whose third argument is
+  the anonymous *startup callback*, that callback's single statement, and the
+  line that closes both.
+
+Two further things the table cannot convey on its own. The first row and the L6
+row both name `server` without colliding: one is the JSDoc module name declared
+in the file header, the other a constant declared inside it, and JSDoc
+distinguishes them by namepath. And **the three blank lines document no symbol at
+all** — L2, L5 and L11 are block boundaries rather than declarations, which is
+why they carry rows in the line-by-line table above but none here.
 
 This page and the module reference are a pair rather than alternatives. One
 reads the module by line and the other by symbol, and neither is a shorter
@@ -397,7 +459,7 @@ to the next. Solid arrows are values flowing between lines; dotted arrows point
 from a line to the symbol that documents it.
 
 ```mermaid
-flowchart TD
+flowchart LR
     subgraph B1["Block 1 - dependency acquisition"]
         L1["L1 const http = require('http')<br/>core module, nothing installed"]
     end
@@ -418,6 +480,7 @@ flowchart TD
         L14["L14 closes the startup callback and listen"]
     end
     subgraph SYM["Documented symbols - full entries in server-module.md"]
+        SM["@module server<br/>the file itself, L1-L14"]
         SH["@constant http"]
         SN["@constant hostname : string"]
         SP["@constant port : number"]
@@ -442,11 +505,28 @@ flowchart TD
     L4 -.-> SP
     L6 -.-> SS
     L6 -.-> SR
+    L7 -.-> SR
+    L8 -.-> SR
+    L9 -.-> SR
+    L10 -.-> SR
     L12 -.-> SC
-%% Blank lines L2, L5 and L11 are the block boundaries themselves, so they
-%% document no symbol and carry no node here. Only components that exist in
-%% server.js appear: one module, one server, one listener. No proxy, database,
-%% cache, queue or second service exists in this system.
+    L13 -.-> SC
+    L14 -.-> SC
+    B1 -.-> SM
+    B2 -.-> SM
+    B3 -.-> SM
+    B4 -.-> SM
+%% All seven documented symbols appear: the module itself plus the four
+%% constants and the two callback typedefs. Two arrow registers are in use -
+%% a solid arrow is control or a value flowing between lines, a dotted arrow
+%% is "this line is documented by that symbol", which is why every block
+%% reaches @module server: the module symbol documents the whole file rather
+%% than any one line. L6 declares @constant server, and L12 only uses it,
+%% which is why no dotted edge runs from L12 to that symbol. Blank lines L2,
+%% L5 and L11 are the block boundaries themselves, so they document no symbol
+%% and carry no node here. Only components that exist in server.js appear:
+%% one module, one server, one listener. No proxy, database, cache, queue or
+%% second service exists in this system.
 ```
 
 Three dependencies are what make the grouping more than a visual convenience.

@@ -95,23 +95,24 @@ npm run docs:md
 Three properties of these commands are worth knowing, and the first is the one
 that surprises people:
 
-- **They differ in what they need, and in what they trust.** `docs:api` runs
-  entirely from the packages `npm install` (or `npm ci`) resolves, because
-  `jsdoc` is a declared devDependency pinned and integrity-checked by
-  `package-lock.json`. `docs:md` instead fetches its generator on demand —
-  `npx --yes --ignore-scripts jsdoc-to-markdown@9.1.3` — so it needs network
-  access the first time it runs on a machine, and the version pin covers only
-  the top-level package: the transitive closure is resolved fresh and is not
-  locked, so successive runs can execute different third-party code. Run it
-  manually when you want a fresh rendering, in a disposable environment and
-  under an unprivileged account; never wire it into a gate. `--ignore-scripts`
-  keeps the fetched packages' lifecycle scripts from running, and
-  [docs/api/server-module.md](docs/api/server-module.md) documents the
-  trade-off in full, including how to lock the generator outside this
-  repository. Keeping it on demand is deliberate: `jsdoc-to-markdown` is
-  optional to this project, so it stays out of `devDependencies` and out of the
-  lockfile, and the three declared devDependencies remain the whole of the
-  required toolchain.
+- **They differ in where their packages come from, though both are pinned.**
+  `docs:api` runs entirely from the packages `npm install` (or `npm ci`) resolves,
+  because `jsdoc` is a declared devDependency pinned and integrity-checked by
+  `package-lock.json`. `docs:md` runs from a second, isolated closure: it executes
+  `npm ci --ignore-scripts --prefix tools/docs-md` and then the local `jsdoc2md`
+  binary. `tools/docs-md` has its own committed `package.json` and
+  `package-lock.json`, so `npm ci` installs exactly the 82 packages recorded
+  there, each pinned to an exact version with an integrity hash, and the one
+  mutable range in the renderer's metadata — an optional `@75lb/nature: latest`
+  peer — is never resolved because it is never installed. The first run on a
+  machine needs registry access or a populated npm cache; later runs can reuse the
+  cache, although `npm ci` still rebuilds the tool directory and does not promise
+  to avoid every registry check. Keeping the renderer out of the root manifest is
+  deliberate: it is optional to this project, so the three declared
+  devDependencies remain the whole of the *required* toolchain, while the lockfile
+  beside it keeps the optional path reproducible rather than ad hoc.
+  [docs/api/server-module.md](docs/api/server-module.md) documents the mechanism
+  in full. It is still not a gate: nothing in the corpus depends on its output.
 - **The output directory is disposable.** `docs/api/generated/` is git-ignored
   build output. Neither command prunes stale files from a previous run, so delete
   the directory when you want a guaranteed-clean rebuild:
@@ -168,7 +169,8 @@ flowchart TD
     SRC["server.js<br/>JSDoc blocks + inline comments"]
     CFG["jsdoc.json<br/>allowUnknownTags: false"]
     API["npm run docs:api<br/>HTML reference"]
-    MD["npm run docs:md - optional, manual<br/>npx fetch, --ignore-scripts<br/>top-level pin only, closure unlocked"]
+    MD["npm run docs:md - optional<br/>npm ci --ignore-scripts in tools/docs-md<br/>then the local jsdoc2md binary"]
+    TOOL["tools/docs-md/<br/>committed manifest + lockfile"]
     GEN["docs/api/generated/<br/>git-ignored build output"]
     PAGES["README.md, CONTRIBUTING.md<br/>and the 11 docs/ pages"]
     LINT["npm run docs:lint<br/>.markdownlint-cli2.jsonc"]
@@ -178,6 +180,7 @@ flowchart TD
     SRC --> CFG
     CFG --> API
     SRC --> MD
+    TOOL --> MD
     API --> GEN
     MD --> GEN
     PAGES --> LINT

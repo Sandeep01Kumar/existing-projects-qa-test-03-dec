@@ -309,7 +309,7 @@ ss -ltn '( sport = :3000 or sport = :8080 )'
 
 ```text
 State  Recv-Q Send-Q Local Address:Port Peer Address:Port
-LISTEN 0      511        127.0.0.1:3000      0.0.0.0:*   
+LISTEN 0      511        127.0.0.1:3000      0.0.0.0:*
 ```
 
 One row came back, and it is `127.0.0.1:3000`. The requested `8080` is absent

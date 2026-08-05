@@ -1,6 +1,10 @@
-# Installed npm packages. Materialised by `npm install` from package-lock.json,
-# which resolves the documentation toolchain declared in devDependencies
-# (jsdoc, markdownlint-cli2, markdown-link-check). Reproducible, so never committed.
+# Installed npm packages, at any depth. The root tree is materialised by
+# `npm install` from package-lock.json, which resolves the required documentation
+# toolchain declared in devDependencies (jsdoc, markdownlint-cli2,
+# markdown-link-check). The tools/docs-md tree is materialised by `npm run docs:md`
+# from tools/docs-md/package-lock.json, which is committed alongside its manifest so
+# the optional renderer resolves to the same closure every time. Both trees are
+# reproducible from a committed lockfile, so neither is ever committed itself.
 node_modules/
 
 # Generated JSDoc output. Written here by `npm run docs:api` and `npm run docs:md`

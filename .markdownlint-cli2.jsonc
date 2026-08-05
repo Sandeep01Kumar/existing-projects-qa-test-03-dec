@@ -15,7 +15,7 @@
 //   established: the repository carried no .editorconfig, no .prettierrc, no
 //   .eslintrc* and no style document of any kind. The conventions below were
 //   therefore ESTABLISHED here, and this file is what makes them enforceable.
-//   CONTRIBUTING.md now states the same conventions in prose for authors; this
+//   CONTRIBUTING.md states the same conventions in prose for authors; this
 //   file is the machine-checkable half of that pair, so the two must agree --
 //   change both together or the gate and the guide will disagree.
 //
@@ -31,9 +31,12 @@
 //   npm run docs:check   -> docs:lint followed by docs:links
 //   npx markdownlint-cli2 (no arguments) -> identical coverage, same arrays
 //
-//   All three routes behave identically, because "docs:lint" is a bare
+//   All three routes lint exactly the same files, because "docs:lint" is a bare
 //   markdownlint-cli2 invocation: every glob and every exclusion comes from
 //   this file (see "globs" and "ignores" below), never from the npm script.
+//   They are not otherwise interchangeable: the two npm routes run the runtime
+//   preflight before linting, and "docs:check" carries on to the link gate once
+//   the lint passes.
 //
 // RUNTIME FLOOR FOR THIS TOOL -- NOT the application's floor
 //   The service itself runs on Node >=18, and that is the floor package.json
@@ -86,8 +89,10 @@
 // EDITING POLICY
 //   Every rule switched off here is a convention the corpus stops being held
 //   to. When the lint fails, fix the markdown; only revisit this file if a rule
-//   genuinely conflicts with a documented requirement. Exactly two relaxations
-//   are authorised (see MD013 and the note at MD033); do not add a third.
+//   genuinely conflicts with a documented requirement. Exactly one relaxation is
+//   authorised, at MD013, and it is the only one; do not add a second. MD033 is
+//   settled here too, but as a decision to keep the upstream default rather than
+//   as a relaxation -- see the note at that rule.
 //
 // VERSIONS THIS FILE WAS VERIFIED AGAINST
 //   markdownlint-cli2 0.23.2 -- the DIRECT dependency, pinned exactly in
@@ -112,7 +117,7 @@
     "config": {
         // Start from "every rule enabled". Named entries below either restate
         // a convention explicitly (so a reader sees it is deliberate) or apply
-        // one of the two authorised relaxations. Nothing is disabled wholesale.
+        // the one authorised relaxation. Nothing is disabled wholesale.
         "default": true,
 
         // MD001/heading-increment -- heading levels never skip (no h2 -> h4).
@@ -132,7 +137,7 @@
             "style": "atx"
         },
 
-        // MD013/line-length -- AUTHORISED RELAXATION 1 of 2.
+        // MD013/line-length -- THE ONE AUTHORISED RELAXATION.
         //
         // The rule stays ENABLED. Only two of its sub-checks are switched off,
         // and each is switched off because the corpus cannot be written
@@ -157,8 +162,8 @@
         // "line_length" is deliberately left at its upstream default. Prose IS
         // still length-checked: markdown treats a single newline as a soft
         // wrap, so paragraphs can be wrapped without changing how they render.
-        // These two exemptions are the only line-length relaxations authorised;
-        // do not add a third.
+        // These two sub-exemptions are the whole of the relaxation authorised
+        // here; do not add a third.
         "MD013": {
             "tables": false,
             "code_blocks": false
@@ -168,11 +173,11 @@
         // with its own title and uses H2+ for sections thereafter.
         "MD025": true,
 
-        // MD033/no-inline-html -- AUTHORISED RELAXATION 2 of 2, and the
-        // relaxation is "leave it exactly as upstream ships it". Restated here
-        // as `true` (identical to the default: enabled, with an empty
-        // allowed_elements list) purely so a reader can see the position was
-        // decided rather than overlooked.
+        // MD033/no-inline-html -- AN EXPLICIT DEFAULT-PRESERVATION DECISION, not
+        // a relaxation: the decision is "leave it exactly as upstream ships it".
+        // Restated here as `true` (identical to the default: enabled, with an
+        // empty allowed_elements list) purely so a reader can see the position
+        // was decided rather than overlooked.
         //
         // It is NOT disabled: the corpus is authored as portable markdown, so
         // raw HTML in prose stays an error. It is NOT tightened either -- no

@@ -72,7 +72,7 @@ synonym.
 | **Request listener** | The anonymous arrow function registered on the server at `server.js:L6-L10`, which runs once per request |
 | **Startup callback** | The anonymous arrow function passed to `server.listen()` at `server.js:L12-L14`, which runs once when the socket is bound |
 | **Loopback binding** | The consequence of the `hostname` constant at `server.js:L3`: the listener accepts connections only from the local machine |
-| **Catch-all response** | The single identical application-level reply — `200`, `text/plain`, `Hello, World!` — that every request receives, because the request listener never inspects the request |
+| **Catch-all response** | The single identical application-level reply — `200`, `text/plain`, `Hello, World!` — that every request Node dispatches to the request listener receives, because the listener never inspects the request |
 
 ## Generated output, and where it is not
 
@@ -93,16 +93,19 @@ with no build step at all.
 
 Neither command works on a bare checkout without one prerequisite each, and they
 differ in which: `docs:api` needs `npm install` (or `npm ci`) to have installed
-the declared `jsdoc` devDependency, while `docs:md` fetches its generator over
-the network with `npx --yes --ignore-scripts jsdoc-to-markdown@9.1.3`.
+the declared `jsdoc` devDependency, while `docs:md` installs its own renderer on
+first use with `npm ci --ignore-scripts --prefix tools/docs-md` and then runs the
+local `jsdoc2md` binary.
 
-That fetch is why `docs:md` is optional and manual. Its version pin covers the
-top-level package only — the transitive closure is resolved fresh and is not
-locked to integrity hashes — so it downloads and runs third-party code that can
-differ between runs. Use it in a disposable environment under an unprivileged
-account, never in an automated gate, and read
-[api/server-module.md](api/server-module.md) for the full trade-off and for how
-to lock the generator outside this repository.
+That install is why `docs:md` is optional: it needs either registry access or an
+npm cache already containing the locked tarballs. Later runs can reuse that
+cache, but `npm ci` still rebuilds the renderer's `node_modules`; the script does
+not promise to avoid every registry check. It is not, however, unpinned —
+`tools/docs-md` carries a committed manifest and lockfile, so `npm ci` installs
+exactly the closure recorded there, with an integrity hash for every package.
+Nothing in the corpus depends on its output, and no gate invokes it. See
+[api/server-module.md](api/server-module.md) for the mechanism and why the
+renderer is kept out of the root manifest.
 [getting-started/installation.md](getting-started/installation.md) owns the
 install step and [../CONTRIBUTING.md](../CONTRIBUTING.md) documents both
 commands in full.

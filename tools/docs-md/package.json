@@ -1,0 +1,13 @@
+{
+    "name": "hello-world-docs-md-tool",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Isolated, lock-backed manifest for the optional docs:md Markdown renderer. Kept out of the root manifest so the required documentation toolchain stays at three packages, and committed with its own lockfile so the renderer is never resolved fresh from the registry at run time.",
+    "license": "MIT",
+    "engines": {
+        "node": ">=22.12.0"
+    },
+    "devDependencies": {
+        "jsdoc-to-markdown": "9.1.3"
+    }
+}

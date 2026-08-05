@@ -608,7 +608,7 @@ This check uses only what you already installed to run the service, so it works
 anywhere the service itself works:
 
 ```bash
-node -e "require('http').get('http://127.0.0.1:3000/', res => { let body=''; res.on('data', c => body += c); res.on('end', () => { console.log('status', res.statusCode); console.log('content-type', res.headers['content-type']); console.log('bytes', Buffer.byteLength(body)); console.log('body', JSON.stringify(body)); }); }).on('error', e => { console.error('request failed:', e.message); process.exitCode = 1; });"
+node -e "const req=require('http').get('http://127.0.0.1:3000/', res => { let body=''; res.on('data', c => body += c); res.on('end', () => { console.log('status', res.statusCode); console.log('content-type', res.headers['content-type']); console.log('bytes', Buffer.byteLength(body)); console.log('body', JSON.stringify(body)); }); }); req.setTimeout(5000, () => req.destroy(new Error('no response within 5000 ms'))); req.on('error', e => { console.error('request failed:', e.message); process.exitCode = 1; });"
 ```
 
 ```text
@@ -620,9 +620,31 @@ body "Hello, World!\n"
 
 That reports the same four facts the `curl` transcript shows, and it makes the
 trailing newline visible: `JSON.stringify` prints it as `\n`, which is how the
-14 bytes are made up — 13 characters of greeting plus one line feed. A failed
-request prints `request failed:` with Node's reason and exits non-zero, so the
-command is usable as a check rather than only as a demonstration.
+14 bytes are made up — 13 characters of greeting plus one line feed. It exits `0`.
+
+The request is kept in a variable so it can be bounded, which is what makes this
+usable as a check rather than only as a demonstration. Two things can go wrong,
+and each ends the command instead of leaving it waiting:
+
+- **Nothing is listening.** The `error` handler reports Node's reason on standard
+  error and sets a non-zero exit code. Captured with the service stopped:
+
+  ```text
+  request failed: connect ECONNREFUSED 127.0.0.1:3000
+  ```
+
+- **Something accepts the connection and then says nothing.** Without a deadline
+  this is the case that hangs — the connection succeeds, so no `error` ever fires.
+  `req.setTimeout` gives it 5 000 ms and then destroys the request with a reason,
+  which the same handler reports. Captured against a listener that accepts and
+  never replies:
+
+  ```text
+  request failed: no response within 5000 ms
+  ```
+
+Both branches exit `1`, so a script can act on the status rather than parsing the
+text.
 
 One request is enough to verify an install, so only one appears here. The full
 contract — which methods and paths match, why every one of them produces the

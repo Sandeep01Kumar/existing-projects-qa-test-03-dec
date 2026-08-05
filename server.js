@@ -6,10 +6,13 @@
  * @module server
  *
  * @description
- * This file is the entire application: 14 content lines -- 11 lines of code and
- * 3 blank separators -- with no framework, no router, and no runtime
- * dependencies. Four of its properties are surprising enough to be stated
- * outright rather than left for a reader to infer from the code.
+ * This file is the entire application. Its original unannotated executable
+ * layout is 14 content lines -- 11 lines of code and 3 blank separators -- with
+ * no framework, no router, and no runtime dependencies; the annotation layer
+ * documented here makes the physical file considerably longer than that, and the
+ * 14-line layout is the citation basis described below rather than the file's
+ * current length. Four of the module's properties are surprising enough to be
+ * stated outright rather than left for a reader to infer from the code.
  *
  * 1. **It defines no public export.** There is no `module.exports` and no
  *    `exports.*` assignment anywhere in the file. CommonJS still hands a
@@ -31,9 +34,10 @@
  * 4. **Reachability is restricted to the local machine.** Binding the loopback
  *    hostname means no other host can reach this service at all.
  *
- * Four transport behaviours belong to Node rather than to this file, and each
- * one qualifies point 3 above. They are stated here so that "the same response"
- * is never read as "the same bytes".
+ * Several transport behaviours belong to Node rather than to this file, and each
+ * one qualifies point 3 above. The four below are the ones that matter in
+ * practice, and they are stated here so that "the same response" is never read as
+ * "the same bytes".
  *
  * - **A `Date` header is generated on every response.** `http.Server` sends it by
  *   default, and its value advances with the clock, so two responses emitted in
@@ -92,22 +96,47 @@
  * `res.setHeader()` call; no combined status-and-headers helper is used anywhere
  * in this file, so the head is flushed implicitly by `res.end()` at L9.
  *
- * Two kinds of request are answered differently, and neither difference
- * originates here. A `CONNECT` request never reaches this function at all: Node
- * routes it to the separate `connect` event, which this file does not handle, so
- * the socket is closed with no response. And for a `HEAD` request Node discards
- * the payload handed to `res.end()` before it reaches the wire, so the client
- * receives the status line and headers with no body and no `Content-Length`.
+ * Some requests are answered differently, and none of those differences
+ * originates here. The cases below are the ones that matter in practice rather
+ * than an exhaustive account of what the runtime does:
  *
- * @param {http.IncomingMessage} req - The inbound request. **Never read.** No
- * property of it is inspected anywhere in the handler, neither `method`, `url`,
- * nor `headers`, and the body stream is never consumed. That omission is exactly
- * why every request reaching this handler receives the same application-level
- * reply -- the same status, content type, and greeting -- and why the service has
- * no routing and no method discrimination. Node still consults the request itself
- * when it frames the response: the `Date` header, the `Connection`/`Keep-Alive`
- * pair, and the suppression of the body for `HEAD` all come from the runtime, not
- * from here.
+ * - A `CONNECT` request never reaches this function at all: Node routes it to the
+ *   separate `connect` event, which this file does not handle, so the socket is
+ *   closed with no response.
+ * - An HTTP/1.1 request carrying an `Expect` header Node does not honour --
+ *   anything other than `100-continue` -- is answered `417 Expectation Failed` by
+ *   Node itself and the `request` event never fires, so this function never runs.
+ *   The same header on an HTTP/1.0 request is ignored and the ordinary reply
+ *   follows, because HTTP/1.0 defines no expectation for the runtime to refuse.
+ * - For a `HEAD` request Node discards the payload handed to `res.end()` before it
+ *   reaches the wire, so the client receives the status line and headers with no
+ *   body and no `Content-Length`. This function still runs unchanged.
+ *
+ * @param {http.IncomingMessage} req - The inbound request. **Never read by
+ * application logic.** No property of it is inspected anywhere in the handler,
+ * neither `method`, `url`, nor `headers`, and the body stream is never read here
+ * either. That omission is exactly why every request reaching this handler
+ * receives the same application-level reply -- the same status, content type, and
+ * greeting -- and why the service has no routing and no method discrimination.
+ *
+ * "Never read by application logic" is narrower than "never consumed", and the
+ * difference matters for resource analysis. Once the response finishes, Node
+ * discards any request body the application left unread, so the bytes are still
+ * received over the network, still buffered by the runtime, and still hold the
+ * connection open while they arrive -- they are simply thrown away instead of
+ * being delivered anywhere. Verified: a 5 MB body sent after this handler had
+ * already replied was consumed in full, and a second request on the same
+ * connection was answered normally, which is only possible because the runtime
+ * drained the first one.
+ *
+ * The runtime, not this file, then frames the response, and two of the things it
+ * does are derived from the very request this handler ignores: the
+ * `Connection`/`Keep-Alive` pair follows the request's protocol version and its
+ * own `Connection` header, and the body is suppressed for a `HEAD` request. The
+ * `Date` header is different in kind -- Node generates it from the clock, so it
+ * reflects when the response was produced rather than anything the request
+ * carried. See docs/api/http-api.md for the request-flow contract and
+ * docs/architecture/request-lifecycle.md for the resource consequences.
  * @param {http.ServerResponse} res - The outbound response stream the reply is
  * composed on. It is mutated in place.
  *
@@ -258,7 +287,7 @@ const port = 3000; // The TCP port the listener will bind.
  * @see {@link https://nodejs.org/docs/latest-v22.x/api/http.html#class-httpserver|Node.js http.Server class documentation}
  * @see {@link https://nodejs.org/docs/latest-v22.x/api/http.html#httpcreateserveroptions-requestlistener|Node.js http.createServer() documentation}
  */
-const server = http.createServer((req, res) => { // Instantiates an http.Server and registers the per-request listener.
+const server = http.createServer((req, res) => { // Instantiates an http.Server and registers the request listener invoked once per request.
   res.statusCode = 200; // Sets the status line; must precede any body byte written.
   res.setHeader('Content-Type', 'text/plain'); // Declares the payload MIME type; must precede res.end.
   res.end('Hello, World!\n'); // Supplies the 14-byte body and terminates the response, flushing the implicit head; for a HEAD, Node discards that body.

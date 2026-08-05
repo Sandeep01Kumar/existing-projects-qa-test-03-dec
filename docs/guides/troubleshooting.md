@@ -84,7 +84,7 @@ the per-platform commands are in the sections that follow.
 | `PORT=8080 node server.js` still serves on 3000 | No environment variable is read anywhere | **Intended.** Edit the constant instead | [../getting-started/configuration.md](../getting-started/configuration.md) |
 | A `docs:*` script exits 1 before doing anything | Node.js below the `devEngines.runtime` floor of `>=22.12.0` | Upgrade Node.js for documentation work; the service itself still runs on `>=18`, though only a maintained LTS line should be used | [Unsupported Node.js version](#unsupported-nodejs-version) |
 | `npm run docs:api` cannot find `jsdoc` | `node_modules` is absent, so the declared devDependency was never installed | Run `npm install` (or `npm ci`) first | [../getting-started/installation.md](../getting-started/installation.md) |
-| `npm run docs:md` cannot fetch its generator | `docs:md` fetches `jsdoc-to-markdown@9.1.3` on demand rather than declaring it, so its first run on a machine needs network access | Run it once, manually, with the registry reachable, in a disposable environment | [npm run docs:md cannot fetch its generator](#npm-run-docsmd-cannot-fetch-its-generator) |
+| `npm run docs:md` cannot install its generator | The optional renderer lives in `tools/docs-md`, so the script runs `npm ci` there first; the install needs registry access or a populated npm cache | Restore registry access or supply the locked tarballs through npm's cache. The install is lockfile-pinned, so retrying is deterministic | [npm run docs:md cannot install its generator](#npm-run-docsmd-cannot-install-its-generator) |
 
 ## `EADDRINUSE` on start
 
@@ -94,41 +94,90 @@ one host. `Source: server.js:L4` The bind itself happens in the `server.listen`
 call. `Source: server.js:L12`
 
 Reproduce it by starting a second instance while the first still holds the port.
-The second process exits immediately, so this does not block. The block is also
-self-cleaning, which matters in a guide you are reading while something is
-already wrong: the first instance's PID is captured at spawn so the last two
-lines can undo exactly what the first line did, and its log is written outside
-the repository so no untracked file is left in your working tree.
+The second process exits immediately, so this does not block, and the block
+cleans up after itself — which matters in a guide you are reading while something
+is already wrong. Run it from the repository root:
 
 ```bash
-node server.js > "${TMPDIR:-/tmp}/instance-1.log" 2>&1 &
-first_pid=$!
-sleep 1
-node server.js
-echo "exit code: $?"
-kill "$first_pid"
-rm -f "${TMPDIR:-/tmp}/instance-1.log"
+(
+  work="$(mktemp -d)" || exit 1
+  cleanup() {
+    if jobs %1 >/dev/null 2>&1; then
+      kill %1 2>/dev/null || true
+      wait %1 2>/dev/null || true
+    fi
+    rm -rf -- "$work"
+  }
+  trap cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  node server.js > "$work/instance-1.log" 2>&1 &
+  sleep 1
+  if ! grep -q 'Server running at' "$work/instance-1.log"; then
+    echo "the first instance never printed its banner, so it is not holding the port:"
+    cat -- "$work/instance-1.log"
+    wait %1
+    echo "first instance exit status: $?"
+    exit 1
+  fi
+  node server.js
+  echo "second instance exit code: $?"
+  kill %1
+  wait %1
+  echo "first instance stopped, exit status $?"
+)
 ```
 
-Two lines produce output. The second `node server.js` writes the trace
-reproduced below to stderr, and `echo` reports its status as `exit code: 1`. The
-`kill` and `rm -f` lines print nothing of their own. An interactive `bash`
-session does add one line about the background job it has just lost, captured
-here from a live session:
+Every line of that is load-bearing, and four of them are there for safety rather
+than for the demonstration:
+
+| Line | Why it is written that way |
+| --- | --- |
+| `work="$(mktemp -d)"` | A **fresh, unguessable** directory, created with owner-only permissions (`rwx------`). A fixed path such as `/tmp/instance-1.log` would be *truncated* by the redirect, so an existing file of that name — yours or another user's — is destroyed rather than appended to; and on a shared `/tmp` that name could already be a symlink, in which case the redirect writes through it to whatever it points at. Both were reproduced while writing this page (CWE-377, CWE-59) |
+| `cleanup`, the `EXIT` trap and the three signal traps | `EXIT` always runs the cleanup, including after the early `grep` branch. The signal traps convert `HUP`, `INT` and `TERM` to exits with their conventional `128 + signal` statuses, so `EXIT` also stops and reaps the child on interruption instead of merely deleting its log. A `rm` on the last line would run only when everything before it succeeded. `rm -rf` is safe here precisely because the path was just created by `mktemp` and is not a name anyone can predict |
+| `kill %1` and `wait %1` | `%1` is the shell's **job spec** for the child this block started, not a number that happens to identify it. The `( … )` subshell has its own, initially empty, job table, so `%1` cannot resolve to a job that already existed in your interactive shell, and bash resolves it against a child it has not yet reaped — so it cannot land on an unrelated process that inherited a recycled PID. `wait` then reaps that child and reports its real exit status, which is also what guarantees the port is released before the block returns |
+| the `grep`/`wait`/`exit 1` branch | The one case where a naive version does real damage. If port 3000 was **already** taken before you started, instance 1 dies on the same `EADDRINUSE` you are trying to reproduce, and there is nothing to signal. This branch detects that from the absent banner, shows you instance 1's own log, reaps it, and **signals nothing at all** |
+
+On the happy path — port 3000 free when you start — three things print. The
+second `node server.js` writes the trace reproduced below to **stderr**, and two
+lines go to **stdout**:
 
 ```text
-[1]+  Terminated              node server.js > "${TMPDIR:-/tmp}/instance-1.log" 2>&1
+second instance exit code: 1
+first instance stopped, exit status 143
 ```
 
-That is your shell reporting on its own job table rather than the service saying
-anything, and it does not appear at all when the block is run from a script,
-where the two cleanup lines are completely silent.
+`143` is `128 + 15`: the first instance was ended by `SIGTERM`, which is the
+signal plain `kill` sends. Because the background job belongs to the subshell
+rather than to your shell, no `[1]+ Terminated` job-control line appears, and
+the output is the same whether you paste the block into an interactive shell or
+run it from a script. Both were verified.
 
-Signalling `$first_pid` rather than a PID discovered from the port is
-deliberate: a PID captured at spawn cannot name a process this block did not
-start. The remediation sections below have to discover the PID instead, because
-there the process holding the port is someone else's, and they pair the
-discovery with an identity check this block does not need.
+If the port was already occupied, the block takes the other branch instead. Its
+stdout, captured with an unrelated process holding `127.0.0.1:3000`, is the
+sentence above the log, then instance 1's own trace, then its status:
+
+```text
+the first instance never printed its banner, so it is not holding the port:
+```
+
+```text
+first instance exit status: 1
+```
+
+That is the honest answer to a question you did not ask: the port is in use, but
+by something this block did not start, so the remediation is the discovery
+procedure below rather than anything in this block. Note the asymmetry with the
+happy path — **here nothing is signalled at all.** A PID captured at spawn is not
+special, and it is worth being explicit about that because it is easy to assume
+otherwise: once the child has exited and been reaped, the kernel is free to hand
+its number to something unrelated, so a version that stored the PID in a variable
+and then ran `kill` on it unconditionally could signal a stranger — and this is
+exactly the branch on which it would, because instance 1 is already dead. That is
+the same PID-reuse hazard that [Clearing it](#clearing-it) works around by hand
+(CWE-367), and it is why the block above manages the child by job spec and reaps
+it with `wait` instead of trusting a number.
 
 ### What is stable, and what is not
 
@@ -188,9 +237,10 @@ statement that rethrows the unhandled event, a caret marking the column it was
 thrown from, and a blank line. The failure proper begins on the fifth line, at
 `Error: listen EADDRINUSE`.
 
-It then exits with `exit code: 1`. The final `{ ... }` block is the error
-object, and it is the most useful part: it names the code, the syscall, and the
-exact address and port that could not be bound.
+It then exits with status 1, which is what the block above reports on stdout as
+`second instance exit code: 1`. The final `{ ... }` block is the error object,
+and it is the most useful part: it names the code, the syscall, and the exact
+address and port that could not be bound.
 
 The second instance exited with status 1. The `node:events:NNN` header, the
 stack-frame line numbers and the trailing version line follow your runtime; the
@@ -360,25 +410,42 @@ So `2` is the code to branch on in a script: `0` means the probe reached a
 conclusion and printed it on standard output, and `2` means it did not reach
 one at all.
 
-A shorter one-liner covers the same ground when you would rather read the
-outcome from the exit code than from the printed line. It is the form the
-exit-code table below documents, and it distinguishes *free* from *in use* by
-status as well as by message:
+A shorter one-liner makes the same three distinctions when you would rather read
+the outcome from the exit code than from the printed line. It keeps everything
+that makes the version above trustworthy — it treats only `ECONNREFUSED` as free,
+it bounds the wait with the same two-second socket timeout, and it reports
+anything else as inconclusive — and it adds a distinct exit status per branch:
 
 ```bash
-node -e "const s=require('net').connect(3000,'127.0.0.1');s.on('connect',()=>{console.log('127.0.0.1:3000 is accepting connections');s.end();process.exit(0);});s.on('error',e=>{if(e.code==='ECONNREFUSED'){console.log('127.0.0.1:3000 refused the connection: nothing is listening');process.exit(1);}console.log('127.0.0.1:3000 is not accepting connections: '+e.code);process.exit(2);});"
+node -e "const s=require('net').connect(3000,'127.0.0.1');s.setTimeout(2000);s.on('connect',()=>{console.log('127.0.0.1:3000 is accepting connections');s.end();process.exit(0);});s.on('timeout',()=>{console.error('127.0.0.1:3000 is not accepting connections: connect timed out after 2000 ms');s.destroy();process.exit(2);});s.on('error',e=>{if(e.code==='ECONNREFUSED'){console.log('127.0.0.1:3000 refused the connection: nothing is listening');process.exit(1);}console.error('127.0.0.1:3000 is not accepting connections: '+e.code);process.exit(2);});"
 ```
 
-Captured while the service was running:
+The `setTimeout` call and its `timeout` handler are not decoration. Without them
+a connection that is neither accepted nor refused — one dropped by a firewall, or
+aimed at an unreachable route — waits on the kernel's own connect timeout, which
+on Linux runs to roughly two minutes. That is the opposite of what you want from
+a probe you are about to put in a script, so this form bounds the wait itself and
+destroys the socket rather than letting it hang.
+
+Three captured runs, one per branch. With the service running:
 
 ```text
 127.0.0.1:3000 is accepting connections
 ```
 
-Captured with nothing listening:
+With nothing listening:
 
 ```text
 127.0.0.1:3000 refused the connection: nothing is listening
+```
+
+And with packets to `127.0.0.1:3000` dropped by a local firewall rule, so the
+connection can neither complete nor be refused — the command itself was run
+unmodified. This branch writes to **standard error** and exits `2`, and it is
+the branch the deadline exists for:
+
+```text
+127.0.0.1:3000 is not accepting connections: connect timed out after 2000 ms
 ```
 
 It sets an exit code as well as printing, so it can be used in a script:
@@ -387,11 +454,16 @@ It sets an exit code as well as printing, so it can be used in a script:
 | --- | --- |
 | `0` | The connection was accepted — something is listening on `127.0.0.1:3000` |
 | `1` | `ECONNREFUSED` — nothing is listening, so the port is free |
-| `2` | Any other error code, which is **not** the same as a free port: the code is printed so it can be read, for example a timeout or a permission failure |
+| `2` | Everything else, which is **not** the same as a free port: the two-second connect deadline expiring, or any other error code. Both go to standard error, with the code or the timeout named so it can be read — for example a filtered port or a permission failure |
 
 The distinction in exit code `2` matters. A probe that reported "free" for every
 error would call a filtered or unreachable port free and send you looking for the
 wrong problem.
+
+Both forms now reach the same three judgements, then, and what separates them is
+how they report. The longer one splits the streams — conclusions on standard
+output, uncertainty on standard error — which suits reading by eye; this one gives
+every branch its own exit status, which suits reading by script.
 
 ### Clearing it
 
@@ -983,34 +1055,48 @@ command exits non-zero, the half that failed is named immediately above the
 failure — a lint violation reports a file, a line and the rule it broke, while a
 link failure reports the page and the target that could not be resolved.
 
-## npm run docs:md cannot fetch its generator
+## npm run docs:md cannot install its generator
 
-`docs:md` is the one script that does not run from installed packages. It
-fetches its generator at run time:
+`docs:md` is the one script that does not run from the root `node_modules`. Its
+renderer is optional tooling with a manifest and lockfile of its own, so the
+script installs that closure first and then runs the local binary:
 
 ```bash
-npx --yes --ignore-scripts jsdoc-to-markdown@9.1.3 --files server.js
+npm ci --ignore-scripts --prefix tools/docs-md
+node tools/docs-md/node_modules/.bin/jsdoc2md --files server.js
 ```
 
-An offline machine, a proxy that blocks the registry, or a cold npm cache
-therefore produces a fetch failure instead of a rendering. Two things are worth
-knowing before retrying it.
+The install therefore needs registry access or an npm cache already containing
+the locked tarballs. Later runs can reuse that cache, but `npm ci` still removes
+and rebuilds `tools/docs-md/node_modules`; it does not promise to avoid every
+registry check. An offline machine with a cold cache, or a proxy that blocks the
+registry, produces an install failure from the first command instead of a
+rendering. Three things are worth knowing.
 
 **It is optional, so nothing else is blocked.** The committed reference is
 [../api/server-module.md](../api/server-module.md), the HTML reference comes
 from `docs:api`, and neither `docs:lint` nor `docs:links` calls `docs:md`. A
-failed fetch fails no gate.
+failed install fails no gate.
 
-**Retry it deliberately rather than automatically.** The `@9.1.3` pin fixes the
-top-level package only; its transitive dependencies are resolved fresh, with no
-lockfile and no integrity hashes, so the run downloads and executes third-party
-code that can differ from the last run (CWE-494). `--ignore-scripts` stops the
-fetched packages' lifecycle scripts from running and does not sandbox the
-generator itself. Run it by hand, in a disposable environment, under an
-unprivileged account, never as `root`, and never from a gate or a CI job.
-[../api/server-module.md](../api/server-module.md) documents the trade-off in
-full, including how to lock the generator in a throwaway project when the
-rendering needs to be reproducible.
+**Retrying is safe and deterministic.** `npm ci` installs exactly what
+`tools/docs-md/package-lock.json` names — 82 packages, every one pinned to an
+exact version with an integrity hash and a registry tarball — so a retry cannot
+pull a different closure than the last successful run. That is the point of
+committing the lockfile: the earlier form of this script fetched the renderer with
+`npx`, which pinned the top-level package only and resolved its dependencies fresh
+on every machine, executing third-party code that could differ between runs
+(CWE-494).
+
+**Diagnose it as an install failure, not a fetch failure.** Read the error npm
+prints from the first command. `ENOTFOUND` or a proxy error means the registry is
+unreachable; `EINTEGRITY` means what arrived did not match the recorded hash and
+should be investigated rather than retried around; a missing
+`tools/docs-md/package-lock.json` means the manifest and lock were not checked out
+together, and `npm ci` correctly refuses to invent a resolution. If you would
+rather not install into the repository, run the same two commands inside a
+container — the lockfile makes the result identical.
+[../api/server-module.md](../api/server-module.md) documents the mechanism in
+full.
 
 ## Verifying the port binding and the running process
 
